@@ -23,8 +23,10 @@ repos:
         (?x)^(
           .*example-layer.tar.gz|
           .*\.(png|svg|ico|gpg)|
-          dev/version-manifest/version-manifest
+          dev/version-manifest/version-manifest|
+          .*gradle-wrapper\.jar
         )$
     - id: script-must-have-extension
     - id: shellcheck
       args: [-e, "SC1090,SC1091"]
+      exclude: .*/gradlew$
