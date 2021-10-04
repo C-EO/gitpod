@@ -32,7 +32,7 @@ body:
 - type: input
   id: workspace
   attributes:
-    label: Workspace Affected
+    label: Workspace affected
     description: Does this issue affect a specific workspace on Gitpod.io?
     placeholder: e.g. kumquat-goose-831fpnxf
 - type: textarea
