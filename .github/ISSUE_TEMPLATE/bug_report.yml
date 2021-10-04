@@ -19,12 +19,6 @@ body:
     description: Describe the steps to reproduce the issue
   validations:
     required: true
-- type: input
-  id: workspace
-  attributes:
-    label: Workspace Affected
-    description: Does this issue affect a specific workspace?
-    placeholder: e.g. kumquat-goose-831fpnxf
 - type: textarea
   id: expected-behavior
   attributes:
@@ -35,6 +29,12 @@ body:
   attributes:
     label: Example repository
     description: If possible, please [share a Gitpod workspace snapshot](https://www.gitpod.io/docs/sharing-and-collaboration#sharing-snapshots) or create a [minimal, reproducible example](https://stackoverflow.com/help/minimal-reproducible-example) of the bug and link it here in the bug report.
+- type: input
+  id: workspace
+  attributes:
+    label: Workspace Affected
+    description: Does this issue affect a specific workspace on Gitpod.io?
+    placeholder: e.g. kumquat-goose-831fpnxf
 - type: textarea
   id: anything-else
   attributes:
