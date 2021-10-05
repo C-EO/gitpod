@@ -58,6 +58,14 @@ export default function Preferences() {
                         <span className="mt-2 ml-2 self-center rounded-xl py-0.5 px-2 text-sm bg-orange-100 text-orange-700 dark:bg-orange-600 dark:text-orange-100 font-semibold">INSIDERS</span>
                     </SelectableCard>
                 </Tooltip>
+                <Tooltip content={'Nightly features from main for developers and early adopters.'} >
+                    <SelectableCard className="w-36 h-40" title="VS Code" selected={defaultIde === 'code-nightly'} onClick={() => actuallySetDefaultIde('code-nightly')}>
+                        <div className="flex justify-center mt-3">
+                            <img className="w-16 filter-grayscale self-center" src={vscode} />
+                        </div>
+                        <span className="mt-2 ml-2 self-center rounded-xl py-0.5 px-2 text-sm bg-orange-100 text-orange-700 dark:bg-orange-600 dark:text-orange-100 font-semibold">NIGHTLY</span>
+                    </SelectableCard>
+                </Tooltip>
             </div>
             <h3 className="mt-12">Theme</h3>
             <p className="text-base text-gray-500">Early bird or night owl? Choose your side.</p>

@@ -164,7 +164,7 @@ type WorkspaceConfig struct {
 	// because Gitpod determines this port, not the IDE.
 	IDEPort int `env:"GITPOD_THEIA_PORT"`
 
-	// IDEAlias is the alias of the IDE to be run. Possible values: "code", "code-latest", "theia"
+	// IDEAlias is the alias of the IDE to be run. Possible values: "code", "code-latest", "code-nightly", "theia"
 	IDEAlias string `env:"GITPOD_IDE_ALIAS"`
 
 	// WorkspaceRoot is the location in the filesystem where the workspace content root is located.
