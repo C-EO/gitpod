@@ -6,11 +6,13 @@ package protocol
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 )
 
 var log = logrus.NewEntry(logrus.StandardLogger())
@@ -85,18 +87,31 @@ vscode:
 
 			locationReady := make(chan struct{})
 			configService := NewConfigService(tempDir+"/.gitpod.yml", locationReady, log)
-			context, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			close(locationReady)
 
-			configs, errors := configService.Observe(context)
+			go configService.Watch(ctx)
+
+			var listeners []<-chan *GitpodConfig
+			for i := 0; i < 10; i++ {
+				listeners = append(listeners, configService.Observe(ctx))
+			}
+
 			for i := 0; i < 2; i++ {
-				select {
-				case config := <-configs:
-					if diff := cmp.Diff((*GitpodConfig)(nil), config); diff != "" {
-						t.Errorf("unexpected output (-want +got):\n%s", diff)
-					}
-				case err = <-errors:
+				eg, _ := errgroup.WithContext(ctx)
+				for _, listener := range listeners {
+					l := listener
+					eg.Go(func() error {
+						config := <-l
+						if diff := cmp.Diff((*GitpodConfig)(nil), config); diff != "" {
+							return fmt.Errorf("unexpected output (-want +got):\n%s", diff)
+						}
+						return nil
+					})
+				}
+				err = eg.Wait()
+				if err != nil {
 					t.Fatal(err)
 				}
 
@@ -104,12 +119,20 @@ vscode:
 				if err != nil {
 					t.Fatal(err)
 				}
-				select {
-				case config := <-configs:
-					if diff := cmp.Diff(test.Expectation, config); diff != "" {
-						t.Errorf("unexpected output (-want +got):\n%s", diff)
-					}
-				case err = <-errors:
+
+				eg, _ = errgroup.WithContext(ctx)
+				for _, listener := range listeners {
+					l := listener
+					eg.Go(func() error {
+						config := <-l
+						if diff := cmp.Diff(test.Expectation, config); diff != "" {
+							return fmt.Errorf("unexpected output (-want +got):\n%s", diff)
+						}
+						return nil
+					})
+				}
+				err = eg.Wait()
+				if err != nil {
 					t.Fatal(err)
 				}
 

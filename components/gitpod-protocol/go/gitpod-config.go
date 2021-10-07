@@ -17,8 +17,10 @@ import (
 
 // ConfigInterface provides access to the gitpod config file.
 type ConfigInterface interface {
-	// Observe provides channels triggered whenever the config is changed or errored
-	Observe(ctx context.Context) (<-chan *GitpodConfig, <-chan error)
+	// Watch starts the config watching
+	Watch(ctx context.Context)
+	// Observe provides channels triggered whenever the config is changed
+	Observe(ctx context.Context) <-chan *GitpodConfig
 }
 
 // ConfigService provides access to the gitpod config file.
@@ -26,119 +28,84 @@ type ConfigService struct {
 	location      string
 	locationReady <-chan struct{}
 
-	config    *GitpodConfig
-	listeners map[configListener]struct{}
-	stop      context.CancelFunc
-	mu        sync.Mutex
+	mu     *sync.RWMutex
+	cond   *sync.Cond
+	config *GitpodConfig
+
 	pollTimer *time.Timer
 
 	log *logrus.Entry
 }
 
-type configListener struct {
-	configs chan *GitpodConfig
-	errors  chan error
-}
-
 // NewConfigService creates a new instance of ConfigService
 func NewConfigService(configLocation string, locationReady <-chan struct{}, log *logrus.Entry) *ConfigService {
+	var mu sync.RWMutex
 	return &ConfigService{
 		location:      configLocation,
 		locationReady: locationReady,
-		listeners:     make(map[configListener]struct{}),
-		log:           log,
+		mu:            &mu,
+		cond:          sync.NewCond(&mu),
+		log:           log.WithField("location", configLocation),
 	}
 }
 
-// Observe provides channels triggered whenever the config is changed or errored
-func (service *ConfigService) Observe(ctx context.Context) (<-chan *GitpodConfig, <-chan error) {
-	listener := configListener{
-		configs: make(chan *GitpodConfig),
-		errors:  make(chan error),
-	}
-
+// Observe provides channels triggered whenever the config is changed
+func (service *ConfigService) Observe(ctx context.Context) <-chan *GitpodConfig {
+	var configs = make(chan *GitpodConfig)
 	go func() {
-		defer close(listener.configs)
-		defer close(listener.errors)
+		service.cond.L.Lock()
+		defer service.cond.L.Unlock()
+		for {
+			configs <- service.config
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-service.locationReady:
+			service.cond.Wait()
+			if ctx.Err() != nil {
+				return
+			}
 		}
-
-		err := service.start()
-		if err != nil {
-			// failed to start
-			listener.errors <- err
-			return
-		}
-		listener.configs <- service.config
-
-		service.mu.Lock()
-		service.listeners[listener] = struct{}{}
-		service.mu.Unlock()
-
-		<-ctx.Done()
-
-		service.mu.Lock()
-		delete(service.listeners, listener)
-		if len(service.listeners) == 0 && service.stop != nil {
-			service.stop()
-			service.stop = nil
-		}
-		service.mu.Unlock()
 	}()
-	return listener.configs, listener.errors
+	return configs
 }
 
-func (service *ConfigService) start() error {
-	service.mu.Lock()
-	if service.stop != nil {
-		// alread running
-		service.mu.Unlock()
-		return nil
-	}
+// Watch starts the config watching
+func (service *ConfigService) Watch(ctx context.Context) {
+	service.log.Info("gitpod config watcher: starting...")
 
-	service.log.WithField("location", service.location).Info("Starting watching...")
-	context, stop := context.WithCancel(context.Background())
-	service.stop = stop
-	service.mu.Unlock()
+	select {
+	case <-service.locationReady:
+	case <-ctx.Done():
+		return
+	}
 
 	_, err := os.Stat(service.location)
 	if os.IsNotExist(err) {
-		go service.poll(context)
-		return nil
+		service.poll(ctx)
 	}
-	err = service.watch(context)
-	if err != nil {
-		return err
-	}
-	return nil
+	service.watch(ctx)
 }
 
-func (service *ConfigService) watch(ctx context.Context) (err error) {
+func (service *ConfigService) watch(ctx context.Context) {
 	watcher, err := fsnotify.NewWatcher()
 	defer func() {
 		if err != nil {
-			service.log.WithField("location", service.location).WithError(err).Error("Failed to start watching...")
+			service.log.WithError(err).Error("gitpod config watcher: failed to start")
 			return
 		}
 
-		service.log.WithField("location", service.location).Info("Started watching")
+		service.log.Info("gitpod config watcher: started")
 	}()
 	if err != nil {
-		return err
+		return
 	}
 
 	err = watcher.Add(service.location)
 	if err != nil {
 		watcher.Close()
-		return err
+		return
 	}
 
 	go func() {
-		defer service.log.WithField("location", service.location).Info("Stopped watching")
+		defer service.log.Info("gitpod config watcher: stopped")
 		defer watcher.Close()
 
 		polling := make(chan struct{}, 1)
@@ -150,14 +117,12 @@ func (service *ConfigService) watch(ctx context.Context) (err error) {
 			case <-ctx.Done():
 				return
 			case err := <-watcher.Errors:
-				service.dispatchError(err)
+				service.log.WithError(err).Error("gitpod config watcher: failed to watch")
 			case <-watcher.Events:
 				service.scheduleUpdateConfig(ctx, polling)
 			}
 		}
 	}()
-
-	return nil
 }
 
 func (service *ConfigService) scheduleUpdateConfig(ctx context.Context, polling chan<- struct{}) {
@@ -172,17 +137,9 @@ func (service *ConfigService) scheduleUpdateConfig(ctx context.Context, polling 
 			polling <- struct{}{}
 			go service.poll(ctx)
 		} else if err != nil {
-			service.dispatchError(err)
+			service.log.WithError(err).Error("gitpod config watcher: failed to parse")
 		}
 	})
-}
-
-func (service *ConfigService) dispatchError(err error) {
-	service.mu.Lock()
-	defer service.mu.Unlock()
-	for listener := range service.listeners {
-		listener.errors <- err
-	}
 }
 
 func (service *ConfigService) poll(ctx context.Context) {
@@ -197,21 +154,20 @@ func (service *ConfigService) poll(ctx context.Context) {
 		}
 
 		if _, err := os.Stat(service.location); !os.IsNotExist(err) {
-			_ = service.watch(ctx)
+			service.watch(ctx)
 			return
 		}
 	}
 }
 
 func (service *ConfigService) updateConfig() error {
-	service.mu.Lock()
-	defer service.mu.Unlock()
+	service.cond.L.Lock()
+	defer service.cond.L.Unlock()
 
 	config, err := service.parse()
 	service.config = config
-	for listener := range service.listeners {
-		listener.configs <- service.config
-	}
+	service.cond.Broadcast()
+
 	return err
 }
 

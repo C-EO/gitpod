@@ -192,6 +192,8 @@ func Run(options ...RunOption) {
 	)
 	tokenService.provider[KindGit] = []tokenProvider{NewGitTokenProvider(gitpodService, cfg.WorkspaceConfig, notificationService)}
 
+	go gitpodConfigService.Watch(ctx)
+
 	defer analytics.Close()
 	go analyseConfigChanges(ctx, cfg, analytics, gitpodConfigService)
 
@@ -1175,7 +1177,7 @@ func socketActivationForDocker(ctx context.Context, wg *sync.WaitGroup, term *te
 }
 
 func analyseConfigChanges(ctx context.Context, wscfg *Config, w analytics.Writer, cfgobs gitpod.ConfigInterface) {
-	cfgc, errc := cfgobs.Observe(ctx)
+	cfgc := cfgobs.Observe(ctx)
 	var (
 		cfg     *gitpod.GitpodConfig
 		t       = time.NewTicker(10 * time.Second)
@@ -1240,7 +1242,6 @@ func analyseConfigChanges(ctx context.Context, wscfg *Config, w analytics.Writer
 				},
 			})
 			changes = nil
-		case <-errc:
 		case <-ctx.Done():
 			return
 		}

@@ -113,7 +113,7 @@ func (service *ConfigService) Observe(ctx context.Context) (<-chan *Configs, <-c
 		defer close(updatesChan)
 		defer close(errorsChan)
 
-		configs, errs := service.configService.Observe(ctx)
+		configs := service.configService.Observe(ctx)
 
 		current := &Configs{}
 		if service.gitpodAPI != nil {
@@ -132,8 +132,6 @@ func (service *ConfigService) Observe(ctx context.Context) (<-chan *Configs, <-c
 			select {
 			case <-ctx.Done():
 				return
-			case err := <-errs:
-				errorsChan <- err
 			case config := <-configs:
 				changed := service.update(config, current)
 				if !changed {
