@@ -4,8 +4,11 @@
 
 package mysql
 
+import "github.com/gitpod-io/gitpod/installer/pkg/common"
+
 const (
 	Component       = "mysql"
+	InClusterDBName = common.InClusterDBName
 	SQLInitScripts  = "db-init-scripts"
 	SQLPasswordName = "db-password"
 )

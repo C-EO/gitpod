@@ -9,6 +9,7 @@ package common
 const (
 	BlobServeServicePort = 4000
 	DockerRegistryName   = "registry"
+	InClusterDBName      = "mysql"
 	MonitoringChart      = "monitoring"
 	ProxyComponent       = "proxy"
 	ServerComponent      = "server"

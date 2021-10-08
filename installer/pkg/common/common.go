@@ -98,17 +98,44 @@ func MessageBusEnv(cfg *config.Config) (res []corev1.EnvVar) {
 	return []corev1.EnvVar{}
 }
 
-// todo(sje): provide values from config
 func DatabaseEnv(cfg *config.Config) (res []corev1.EnvVar) {
+	var obj corev1.LocalObjectReference
+
+	if *cfg.Database.InCluster == true {
+		// Cluster provided internally
+		obj = corev1.LocalObjectReference{
+			Name: InClusterDBName,
+		}
+	} else if cfg.Database.RDS.Certificate.Name != "" {
+		// AWS
+		obj = corev1.LocalObjectReference{
+			Name: cfg.Database.RDS.Certificate.Name,
+		}
+	} else if cfg.Database.CloudSQL.Certificate.Name != "" {
+		// GCP
+		obj = corev1.LocalObjectReference{
+			Name: cfg.Database.CloudSQL.Certificate.Name,
+		}
+	}
+
 	return []corev1.EnvVar{{
-		Name:  "DB_HOST",
-		Value: "",
+		Name: "DB_HOST",
+		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: obj,
+			Key:                  "host",
+		}},
 	}, {
-		Name:  "DB_PORT",
-		Value: "",
+		Name: "DB_PORT",
+		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: obj,
+			Key:                  "port",
+		}},
 	}, {
-		Name:  "DB_PASSWORD",
-		Value: "",
+		Name: "DB_PASSWORD",
+		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: obj,
+			Key:                  "password",
+		}},
 	}, {
 		// todo(sje): conditional
 		Name:  "DB_DELETED_ENTRIES_GC_ENABLED",

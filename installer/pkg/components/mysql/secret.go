@@ -12,7 +12,6 @@ import (
 )
 
 func secrets(ctx *common.RenderContext) ([]runtime.Object, error) {
-	// todo(sje): not sure this is the correct condition
 	if *ctx.Config.Database.InCluster == false {
 		return nil, nil
 	}
@@ -31,6 +30,18 @@ func secrets(ctx *common.RenderContext) ([]runtime.Object, error) {
 		},
 		Data: map[string][]byte{
 			"mysql-root-password": []byte(password),
+		},
+	}, &corev1.Secret{
+		TypeMeta: common.TypeMetaSecret,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      InClusterDBName,
+			Namespace: ctx.Namespace,
+			Labels:    common.DefaultLabels(Component),
+		},
+		Data: map[string][]byte{
+			"host":     []byte("db"),
+			"port":     []byte("3306"),
+			"password": []byte(password),
 		},
 	}}, nil
 }
