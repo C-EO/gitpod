@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/gitpod"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor"
 	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/utils"
 	serverapi "github.com/gitpod-io/gitpod/gitpod-protocol"
+	"github.com/gitpod-io/gitpod/supervisor/api"
 	"github.com/spf13/cobra"
 	"golang.org/x/xerrors"
 )
@@ -41,6 +43,23 @@ var portsVisibilityCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 		defer cancel()
 
+		supervisorClient, err := supervisor.New(ctx)
+		if err != nil {
+			return err
+		}
+		defer supervisorClient.Close()
+
+		ports, err := supervisorClient.GetPortsList(ctx)
+		if err != nil {
+			return err
+		}
+		var prePortStatus *api.PortsStatus
+		for _, p := range ports {
+			if p.LocalPort == uint32(port) {
+				prePortStatus = p
+				break
+			}
+		}
 		wsInfo, err := gitpod.GetWSInfo(ctx)
 		if err != nil {
 			return xerrors.Errorf("cannot get workspace info, %w", err)
@@ -53,10 +72,15 @@ var portsVisibilityCmd = &cobra.Command{
 			return xerrors.Errorf("cannot connect to server, %w", err)
 		}
 		defer client.Close()
-		if _, err := client.OpenPort(ctx, wsInfo.WorkspaceId, &serverapi.WorkspaceInstancePort{
+		params := &serverapi.WorkspaceInstancePort{
 			Port:       float64(port),
 			Visibility: visibility,
-		}); err != nil {
+		}
+		if prePortStatus != nil && prePortStatus.Exposed != nil {
+			params.Protocol = prePortStatus.Exposed.Protocol.String()
+		}
+
+		if _, err := client.OpenPort(ctx, wsInfo.WorkspaceId, params); err != nil {
 			return xerrors.Errorf("failed to change port visibility: %w", err)
 		}
 		fmt.Printf("port %v is now %s\n", port, visibility)

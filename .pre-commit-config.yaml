@@ -5,6 +5,7 @@ repos:
       #- id: check-yaml
       #  args: [--allow-multiple-documents]
       - id: check-json
+        exclude: ^.devcontainer/devcontainer.json$
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-symlinks
@@ -22,7 +23,7 @@ repos:
         exclude: |
           (?x)^(
             .*example-layer.tar.gz|
-            .*\.(png|svg|ico|gpg)|
+            .*\.(png|svg|ico|gpg|webp)|
             dev/version-manifest/version-manifest|
             .*gradle-wrapper\.jar
           )$
@@ -79,5 +80,11 @@ repos:
         entry: leeway run components/dashboard:lint
         language: system
         pass_filenames: false
+        files: ^components/dashboard/
+  - repo: https://gitlab.com/bmares/check-json5
+    rev: v1.0.0
+    hooks:
+    - id: check-json5
+      files: ^.devcontainer/devcontainer.json$
 
 exclude: ^install/installer/.*/.*\.golden$

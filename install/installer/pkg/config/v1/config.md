@@ -52,7 +52,7 @@ Config defines the v1 version structure of the gitpod config file
 |`httpProxy.name`|string|Y|  ||
 |`imagePullSecrets[ ].kind`|string|N| `secret` ||
 |`imagePullSecrets[ ].name`|string|Y|  ||
-|`workspace.runtime.fsShiftMethod`|string|N| `fuse`, `shiftfs` ||
+|`workspace.runtime.fsShiftMethod`|string|N| `shiftfs` ||
 |`workspace.runtime.containerdRuntimeDir`|string|Y|  |  The location of containerd socket on the host machine|
 |`workspace.runtime.containerdSocket`|string|Y|  |  The location of containerd socket on the host machine|
 |`workspace.resources.requests`||Y|  |  todo(sje): add custom validation to corev1.ResourceList|
@@ -61,12 +61,6 @@ Config defines the v1 version structure of the gitpod config file
 |`workspace.templates.prebuild`||N|  ||
 |`workspace.templates.imagebuild`||N|  ||
 |`workspace.templates.regular`||N|  ||
-|`workspace.prebuildPVC.size`||Y|  |  Size is a size of persistent volume claim to use|
-|`workspace.prebuildPVC.storageClass`|string|N|  |  StorageClass is a storage class of persistent volume claim to use|
-|`workspace.prebuildPVC.snapshotClass`|string|N|  |  SnapshotClass is a snapshot class name that is used to create volume snapshot|
-|`workspace.pvc.size`||Y|  |  Size is a size of persistent volume claim to use|
-|`workspace.pvc.storageClass`|string|N|  |  StorageClass is a storage class of persistent volume claim to use|
-|`workspace.pvc.snapshotClass`|string|N|  |  SnapshotClass is a snapshot class name that is used to create volume snapshot|
 |`workspace.maxLifetime`||Y|  |  MaxLifetime is the maximum time a workspace is allowed to run. After that, the workspace times out despite activity|
 |`workspace.timeoutDefault`||N|  |  TimeoutDefault is the default timeout of a regular workspace|
 |`workspace.timeoutExtended`||N|  |  TimeoutExtended is the workspace timeout that a user can extend to for one workspace|
@@ -135,7 +129,6 @@ Additional config parameters that are in experimental state
 |`experimental.webapp.server.enableLocalApp`|bool|N|  ||
 |`experimental.webapp.server.runDbDeleter`|bool|N|  ||
 |`experimental.webapp.server.disableWorkspaceGarbageCollection`|bool|N|  ||
-|`experimental.webapp.server.disableLongRunningMigrationJob`|bool|N|  ||
 |`experimental.webapp.server.disableCompleteSnapshotJob`|bool|N|  ||
 |`experimental.webapp.server.inactivityPeriodForReposInDays`|int|N|  ||
 |`experimental.webapp.server.defaultBaseImageRegistryWhitelist[ ]`|[]string|N|  |  @deprecated use containerRegistry.privateBaseImageAllowList instead|
@@ -176,6 +169,4 @@ Additional config parameters that are in experimental state
 |`experimental.ide.openvsxProxy.serviceAnnotations`||N|  ||
 |`experimental.ide.ideMetrics.enabledErrorReporting`|bool|N|  ||
 |`experimental.common.podConfig`||N|  ||
-|`experimental.common.staticMessagebusPassword`|string|N|  ||
-|`experimental.telemetry.data`||N|  ||
 |`experimental.agentSmith`||N|  ||

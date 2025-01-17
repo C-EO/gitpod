@@ -111,12 +111,71 @@ func TestGetOIDCClientConfigForOrganization(t *testing.T) {
 
 }
 
+func TestGetActiveOIDCClientConfigByOrgSlug(t *testing.T) {
+
+	t.Run("not found when config does not exist", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+
+		_, err := db.GetActiveOIDCClientConfigByOrgSlug(context.Background(), conn, "non-existing-org")
+		require.Error(t, err)
+		require.ErrorIs(t, err, db.ErrorNotFound)
+	})
+
+	t.Run("retrieves config which exists", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+
+		// create a single team
+		team := dbtest.CreateOrganizations(t, conn, db.Organization{})[0]
+
+		created := dbtest.CreateOIDCClientConfigs(t, conn, db.OIDCClientConfig{
+			OrganizationID: team.ID,
+			Active:         true,
+		})[0]
+
+		retrieved, err := db.GetActiveOIDCClientConfigByOrgSlug(context.Background(), conn, team.Slug)
+		require.NoError(t, err)
+
+		require.Equal(t, created, retrieved)
+	})
+
+	t.Run("retrieves single active config", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+
+		// create a single team
+		team := dbtest.CreateOrganizations(t, conn, db.Organization{})[0]
+
+		// create multiple
+		activeConfigID := uuid.New()
+		configs := dbtest.CreateOIDCClientConfigs(t, conn, db.OIDCClientConfig{
+			ID:             uuid.New(),
+			OrganizationID: team.ID,
+			Active:         false,
+		}, db.OIDCClientConfig{
+			ID:             activeConfigID,
+			OrganizationID: team.ID,
+			Active:         true,
+		}, db.OIDCClientConfig{
+			ID:             uuid.New(),
+			OrganizationID: team.ID,
+			Active:         false,
+		})
+		require.Len(t, configs, 3)
+
+		retrieved, err := db.GetActiveOIDCClientConfigByOrgSlug(context.Background(), conn, team.Slug)
+		require.NoError(t, err)
+
+		require.Equal(t, activeConfigID, retrieved.ID)
+
+	})
+
+}
+
 func TestActivateClientConfig(t *testing.T) {
 
 	t.Run("not found when config does not exist", func(t *testing.T) {
 		conn := dbtest.ConnectForTests(t)
 
-		err := db.ActivateClientConfig(context.Background(), conn, uuid.New())
+		err := db.SetClientConfigActiviation(context.Background(), conn, uuid.New(), true)
 		require.Error(t, err)
 		require.ErrorIs(t, err, db.ErrorNotFound)
 	})
@@ -134,15 +193,50 @@ func TestActivateClientConfig(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, false, config.Active)
 
-		err = db.ActivateClientConfig(context.Background(), conn, configID)
+		err = db.SetClientConfigActiviation(context.Background(), conn, configID, true)
 		require.NoError(t, err)
 
 		config2, err := db.GetOIDCClientConfig(context.Background(), conn, configID)
 		require.NoError(t, err)
 		require.Equal(t, true, config2.Active)
 
-		err = db.ActivateClientConfig(context.Background(), conn, configID)
+		err = db.SetClientConfigActiviation(context.Background(), conn, configID, true)
 		require.NoError(t, err)
+	})
+
+	t.Run("config activation of config de-activates previous active one", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+
+		organizationId := uuid.New()
+		configs := dbtest.CreateOIDCClientConfigs(t, conn, db.OIDCClientConfig{
+			OrganizationID: organizationId,
+			Active:         false,
+		}, db.OIDCClientConfig{
+			OrganizationID: organizationId,
+			Active:         false,
+		})
+		config1 := configs[0]
+		config2 := configs[1]
+
+		// activate first
+		err := db.SetClientConfigActiviation(context.Background(), conn, config1.ID, true)
+		require.NoError(t, err)
+
+		config1, err = db.GetOIDCClientConfig(context.Background(), conn, config1.ID)
+		require.NoError(t, err)
+		require.Equal(t, true, config1.Active, "failed to activate config1")
+
+		// activate second
+		err = db.SetClientConfigActiviation(context.Background(), conn, config2.ID, true)
+		require.NoError(t, err)
+
+		config2, err = db.GetOIDCClientConfig(context.Background(), conn, config2.ID)
+		require.NoError(t, err)
+		require.Equal(t, true, config2.Active, "failed to activate config2")
+
+		config1, err = db.GetOIDCClientConfig(context.Background(), conn, config1.ID)
+		require.NoError(t, err)
+		require.Equal(t, false, config1.Active, "failed to de-activate config1")
 	})
 
 }
@@ -245,6 +339,28 @@ func TestUpdateOIDCSpec(t *testing.T) {
 		decrypted, err := retrieved.Data.Decrypt(cipher)
 		require.NoError(t, err)
 		require.Equal(t, updateSpec, decrypted)
+	})
+
+	t.Run("updates should unverify entries", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+		cipher, _ := dbtest.GetTestCipher(t)
+
+		created := dbtest.CreateOIDCClientConfigs(t, conn, db.OIDCClientConfig{
+			Verified: db.BoolPointer(true),
+		})[0]
+
+		updateSpec := db.OIDCSpec{
+			ClientSecret: "new-client-secret",
+		}
+
+		err := db.UpdateOIDCClientConfig(context.Background(), conn, cipher, db.OIDCClientConfig{
+			ID: created.ID,
+		}, &updateSpec)
+		require.NoError(t, err)
+
+		retrieved, err := db.GetOIDCClientConfig(context.Background(), conn, created.ID)
+		require.NoError(t, err)
+		require.NotEqual(t, created.Verified, retrieved.Verified)
 	})
 
 }

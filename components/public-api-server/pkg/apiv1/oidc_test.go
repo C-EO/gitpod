@@ -23,10 +23,13 @@ import (
 	connect "github.com/bufbuild/connect-go"
 	"github.com/gitpod-io/gitpod/common-go/experiments"
 	"github.com/gitpod-io/gitpod/common-go/experiments/experimentstest"
+	"github.com/gitpod-io/gitpod/components/public-api/go/config"
 	v1 "github.com/gitpod-io/gitpod/components/public-api/go/experimental/v1"
 	"github.com/gitpod-io/gitpod/components/public-api/go/experimental/v1/v1connect"
 	protocol "github.com/gitpod-io/gitpod/gitpod-protocol"
 	"github.com/gitpod-io/gitpod/public-api-server/pkg/auth"
+	"github.com/gitpod-io/gitpod/public-api-server/pkg/jws"
+	"github.com/gitpod-io/gitpod/public-api-server/pkg/jws/jwstest"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 )
@@ -103,10 +106,10 @@ func TestOIDCService_CreateClientConfig_FeatureFlagEnabled(t *testing.T) {
 		issuer := newFakeIdP(t, true)
 
 		anotherOrg := uuid.New()
-		dbtest.CreateTeamMembership(t, dbConn, db.TeamMembership{
-			TeamID: anotherOrg,
-			UserID: uuid.MustParse(user.ID),
-			Role:   db.TeamMembershipRole_Member,
+		dbtest.CreateTeamMembership(t, dbConn, db.OrganizationMembership{
+			OrganizationID: anotherOrg,
+			UserID:         uuid.MustParse(user.ID),
+			Role:           db.OrganizationMembershipRole_Member,
 		})
 
 		config := &v1.OIDCClientConfig{
@@ -121,6 +124,21 @@ func TestOIDCService_CreateClientConfig_FeatureFlagEnabled(t *testing.T) {
 		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
 	})
 
+	t.Run("returns invalid argument when issuer is not valid URL", func(t *testing.T) {
+		_, client, _ := setupOIDCService(t, withOIDCFeatureEnabled)
+
+		config := &v1.OIDCClientConfig{
+			OrganizationId: organizationID.String(),
+			OidcConfig:     &v1.OIDCConfig{Issuer: "random thing which is not url"},
+			Oauth2Config:   &v1.OAuth2Config{ClientId: "test-id", ClientSecret: "test-secret"},
+		}
+		_, err := client.CreateClientConfig(context.Background(), connect.NewRequest(&v1.CreateClientConfigRequest{
+			Config: config,
+		}))
+		require.Error(t, err)
+		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
 	t.Run("returns invalid argument when issuer is not reachable", func(t *testing.T) {
 		_, client, _ := setupOIDCService(t, withOIDCFeatureEnabled)
 
@@ -133,7 +151,6 @@ func TestOIDCService_CreateClientConfig_FeatureFlagEnabled(t *testing.T) {
 			Config: config,
 		}))
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "no such host")
 		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
 	})
 
@@ -158,9 +175,11 @@ func TestOIDCService_CreateClientConfig_FeatureFlagEnabled(t *testing.T) {
 		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
 		issuer := newFakeIdP(t, true)
 
+		// Trailing slashes should be removed from the issuer
+		issuerWithTrailingSlash := issuer + "/"
 		config := &v1.OIDCClientConfig{
 			OrganizationId: organizationID.String(),
-			OidcConfig:     &v1.OIDCConfig{Issuer: issuer},
+			OidcConfig:     &v1.OIDCConfig{Issuer: issuerWithTrailingSlash},
 			Active:         true,
 			Oauth2Config: &v1.OAuth2Config{
 				ClientId:     "test-id",
@@ -184,7 +203,7 @@ func TestOIDCService_CreateClientConfig_FeatureFlagEnabled(t *testing.T) {
 					Scopes:       []string{"openid", "profile", "email", "my-scope"},
 				},
 				OidcConfig: &v1.OIDCConfig{
-					Issuer: config.OidcConfig.Issuer,
+					Issuer: issuer,
 				},
 			},
 		}, response.Msg)
@@ -195,10 +214,11 @@ func TestOIDCService_CreateClientConfig_FeatureFlagEnabled(t *testing.T) {
 
 		retrieved, err := db.GetOIDCClientConfig(context.Background(), dbConn, uuid.MustParse(response.Msg.Config.Id))
 		require.NoError(t, err)
+		require.Equal(t, issuer, retrieved.Issuer, "issuer must not contain trailing slash")
 
 		decrypted, err := retrieved.Data.Decrypt(dbtest.CipherSet(t))
 		require.NoError(t, err)
-		require.Equal(t, toDbOIDCSpec(config.Oauth2Config, config.OidcConfig), decrypted)
+		require.Equal(t, toDbOIDCSpec(config.Oauth2Config), decrypted)
 	})
 }
 
@@ -271,10 +291,10 @@ func TestOIDCService_GetClientConfig_WithFeatureFlagEnabled(t *testing.T) {
 		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
 
 		anotherOrg := uuid.New()
-		dbtest.CreateTeamMembership(t, dbConn, db.TeamMembership{
-			TeamID: anotherOrg,
-			UserID: uuid.MustParse(user.ID),
-			Role:   db.TeamMembershipRole_Member,
+		dbtest.CreateTeamMembership(t, dbConn, db.OrganizationMembership{
+			OrganizationID: anotherOrg,
+			UserID:         uuid.MustParse(user.ID),
+			Role:           db.OrganizationMembershipRole_Member,
 		})
 
 		_, err := client.GetClientConfig(context.Background(), connect.NewRequest(&v1.GetClientConfigRequest{
@@ -320,10 +340,10 @@ func TestOIDCService_ListClientConfigs_WithFeatureFlagEnabled(t *testing.T) {
 		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
 
 		anotherOrg := uuid.New()
-		dbtest.CreateTeamMembership(t, dbConn, db.TeamMembership{
-			TeamID: anotherOrg,
-			UserID: uuid.MustParse(user.ID),
-			Role:   db.TeamMembershipRole_Member,
+		dbtest.CreateTeamMembership(t, dbConn, db.OrganizationMembership{
+			OrganizationID: anotherOrg,
+			UserID:         uuid.MustParse(user.ID),
+			Role:           db.OrganizationMembershipRole_Member,
 		})
 
 		_, err := client.ListClientConfigs(context.Background(), connect.NewRequest(&v1.ListClientConfigsRequest{
@@ -412,10 +432,10 @@ func TestOIDCService_UpdateClientConfig_WithFeatureFlagEnabled(t *testing.T) {
 		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
 
 		anotherOrg := uuid.New()
-		dbtest.CreateTeamMembership(t, dbConn, db.TeamMembership{
-			TeamID: anotherOrg,
-			UserID: uuid.MustParse(user.ID),
-			Role:   db.TeamMembershipRole_Member,
+		dbtest.CreateTeamMembership(t, dbConn, db.OrganizationMembership{
+			OrganizationID: anotherOrg,
+			UserID:         uuid.MustParse(user.ID),
+			Role:           db.OrganizationMembershipRole_Member,
 		})
 
 		_, err := client.UpdateClientConfig(context.Background(), connect.NewRequest(&v1.UpdateClientConfigRequest{
@@ -455,7 +475,7 @@ func TestOIDCService_UpdateClientConfig_WithFeatureFlagEnabled(t *testing.T) {
 				Id:             created.Msg.GetConfig().Id,
 				OrganizationId: organizationID.String(),
 				OidcConfig: &v1.OIDCConfig{
-					Issuer: issuerNew,
+					Issuer: issuerNew + "/", // trailing slash should be removed
 				},
 				Oauth2Config: &v1.OAuth2Config{
 					Scopes: []string{"foo"},
@@ -470,6 +490,7 @@ func TestOIDCService_UpdateClientConfig_WithFeatureFlagEnabled(t *testing.T) {
 		}))
 		require.NoError(t, err)
 
+		require.Equal(t, config.Active, retrieved.Msg.GetConfig().Active, "unexpected change of `active` flag")
 		require.Equal(t, issuerNew, retrieved.Msg.GetConfig().OidcConfig.Issuer)
 		require.Equal(t, []string{"email", "foo", "openid", "profile"}, retrieved.Msg.GetConfig().GetOauth2Config().GetScopes())
 
@@ -524,10 +545,10 @@ func TestOIDCService_DeleteClientConfig_WithFeatureFlagEnabled(t *testing.T) {
 		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
 
 		anotherOrg := uuid.New()
-		dbtest.CreateTeamMembership(t, dbConn, db.TeamMembership{
-			TeamID: anotherOrg,
-			UserID: uuid.MustParse(user.ID),
-			Role:   db.TeamMembershipRole_Member,
+		dbtest.CreateTeamMembership(t, dbConn, db.OrganizationMembership{
+			OrganizationID: anotherOrg,
+			UserID:         uuid.MustParse(user.ID),
+			Role:           db.OrganizationMembershipRole_Member,
 		})
 
 		_, err := client.DeleteClientConfig(context.Background(), connect.NewRequest(&v1.DeleteClientConfigRequest{
@@ -556,10 +577,176 @@ func TestOIDCService_DeleteClientConfig_WithFeatureFlagEnabled(t *testing.T) {
 	})
 }
 
+func TestOIDCService_SetClientConfigActivation_WithFeatureFlagDisabled(t *testing.T) {
+	t.Run("feature flag disabled returns unauthorized", func(t *testing.T) {
+		_, client, _ := setupOIDCService(t, withOIDCFeatureDisabled)
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id:             uuid.NewString(),
+			OrganizationId: uuid.NewString(),
+			Activate:       true,
+		}))
+		require.Error(t, err)
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+	})
+
+}
+
+func TestOIDCService_SetClientConfigActivation_WithFeatureFlagEnabled(t *testing.T) {
+	t.Run("invalid argument when ID not specified", func(t *testing.T) {
+		_, client, _ := setupOIDCService(t, withOIDCFeatureEnabled)
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{}))
+		require.Error(t, err)
+		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("invalid argument when Organization ID not specified", func(t *testing.T) {
+		_, client, _ := setupOIDCService(t, withOIDCFeatureEnabled)
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id: uuid.NewString(),
+		}))
+		require.Error(t, err)
+		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("returns permission denied when user is not org owner", func(t *testing.T) {
+		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
+
+		anotherOrg := uuid.New()
+		dbtest.CreateTeamMembership(t, dbConn, db.OrganizationMembership{
+			OrganizationID: anotherOrg,
+			UserID:         uuid.MustParse(user.ID),
+			Role:           db.OrganizationMembershipRole_Member,
+		})
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id:             uuid.NewString(),
+			OrganizationId: anotherOrg.String(),
+			Activate:       true,
+		}))
+		require.Error(t, err)
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+	})
+
+	t.Run("activates record", func(t *testing.T) {
+		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
+		issuer := newFakeIdP(t, true)
+
+		created := dbtest.CreateOIDCClientConfigs(t, dbConn, db.OIDCClientConfig{
+			OrganizationID: organizationID,
+			Issuer:         issuer,
+			Active:         false,
+			Verified:       db.BoolPointer(true),
+		})[0]
+
+		resp, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id:             created.ID.String(),
+			OrganizationId: created.OrganizationID.String(),
+			Activate:       true,
+		}))
+		require.NoError(t, err)
+		requireEqualProto(t, &v1.SetClientConfigActivationResponse{}, resp.Msg)
+	})
+
+	t.Run("fails to activate unverified record", func(t *testing.T) {
+		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
+		issuer := newFakeIdP(t, true)
+
+		created := dbtest.CreateOIDCClientConfigs(t, dbConn, db.OIDCClientConfig{
+			OrganizationID: organizationID,
+			Issuer:         issuer,
+			Active:         false,
+			Verified:       db.BoolPointer(false),
+		})[0]
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id:             created.ID.String(),
+			OrganizationId: created.OrganizationID.String(),
+			Activate:       true,
+		}))
+		require.Error(t, err)
+		require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	})
+
+	t.Run("activation of record should deactivate others", func(t *testing.T) {
+		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
+		issuer := newFakeIdP(t, true)
+
+		configs := dbtest.CreateOIDCClientConfigs(t, dbConn, db.OIDCClientConfig{
+			OrganizationID: organizationID,
+			Issuer:         issuer,
+			Active:         true,
+			Verified:       db.BoolPointer(true),
+		}, db.OIDCClientConfig{
+			OrganizationID: organizationID,
+			Issuer:         issuer,
+			Active:         false,
+			Verified:       db.BoolPointer(true),
+		})
+
+		first := configs[0]
+		second := configs[1]
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id:             second.ID.String(),
+			OrganizationId: organizationID.String(),
+			Activate:       true,
+		}))
+		require.NoError(t, err)
+
+		getFirstConfigResponse, err := client.GetClientConfig(context.Background(), connect.NewRequest(&v1.GetClientConfigRequest{
+			Id:             first.ID.String(),
+			OrganizationId: organizationID.String(),
+		}))
+		require.NoError(t, err)
+		require.Equal(t, false, getFirstConfigResponse.Msg.GetConfig().Active)
+	})
+
+	t.Run("deactivates record", func(t *testing.T) {
+		_, client, dbConn := setupOIDCService(t, withOIDCFeatureEnabled)
+		issuer := newFakeIdP(t, true)
+
+		created := dbtest.CreateOIDCClientConfigs(t, dbConn, db.OIDCClientConfig{
+			OrganizationID: organizationID,
+			Issuer:         issuer,
+			Active:         true,
+			Verified:       db.BoolPointer(true),
+		})[0]
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id:             created.ID.String(),
+			OrganizationId: created.OrganizationID.String(),
+			Activate:       false,
+		}))
+		require.NoError(t, err)
+
+		getResponse, err := client.GetClientConfig(context.Background(), connect.NewRequest(&v1.GetClientConfigRequest{
+			Id:             created.ID.String(),
+			OrganizationId: created.OrganizationID.String(),
+		}))
+		require.NoError(t, err)
+		require.Equal(t, false, getResponse.Msg.Config.Active)
+	})
+
+	t.Run("record not found", func(t *testing.T) {
+		_, client, _ := setupOIDCService(t, withOIDCFeatureEnabled)
+
+		_, err := client.SetClientConfigActivation(context.Background(), connect.NewRequest(&v1.SetClientConfigActivationRequest{
+			Id:             uuid.NewString(),
+			OrganizationId: organizationID.String(),
+			Activate:       false,
+		}))
+		require.Error(t, err)
+		require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	})
+}
+
 func setupOIDCService(t *testing.T, expClient experiments.Client) (*protocol.MockAPIInterface, v1connect.OIDCServiceClient, *gorm.DB) {
 	t.Helper()
 
-	dbConn := dbtest.ConnectForTests(t).Debug()
+	dbConn := dbtest.ConnectForTests(t)
 
 	ctrl := gomock.NewController(t)
 	t.Cleanup(ctrl.Finish)
@@ -568,7 +755,16 @@ func setupOIDCService(t *testing.T, expClient experiments.Client) (*protocol.Moc
 
 	svc := NewOIDCService(&FakeServerConnPool{api: serverMock}, expClient, dbConn, dbtest.CipherSet(t))
 
-	_, handler := v1connect.NewOIDCServiceHandler(svc, connect.WithInterceptors(auth.NewServerInterceptor()))
+	keyset := jwstest.GenerateKeySet(t)
+	rsa256, err := jws.NewRSA256(keyset)
+	require.NoError(t, err)
+
+	_, handler := v1connect.NewOIDCServiceHandler(svc, connect.WithInterceptors(auth.NewServerInterceptor(config.SessionConfig{
+		Issuer: "unitetest.com",
+		Cookie: config.CookieConfig{
+			Name: "cookie_jwt",
+		},
+	}, rsa256)))
 
 	router := chi.NewRouter()
 	router.Use(middleware.Logger)
@@ -584,10 +780,10 @@ func setupOIDCService(t *testing.T, expClient experiments.Client) (*protocol.Moc
 	serverMock.EXPECT().GetLoggedInUser(gomock.Any()).Return(user, nil).AnyTimes()
 	serverMock.EXPECT().GetTeams(gomock.Any()).Return(teams, nil).AnyTimes()
 	// ensure our user is owner of our default org
-	dbtest.CreateTeamMembership(t, dbConn, db.TeamMembership{
-		UserID: uuid.MustParse(user.ID),
-		TeamID: organizationID,
-		Role:   db.TeamMembershipRole_Owner,
+	dbtest.CreateTeamMembership(t, dbConn, db.OrganizationMembership{
+		UserID:         uuid.MustParse(user.ID),
+		OrganizationID: organizationID,
+		Role:           db.OrganizationMembershipRole_Owner,
 	})
 
 	return serverMock, client, dbConn

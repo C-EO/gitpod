@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2025 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -59,6 +59,16 @@ func (s *ProxyWorkspacesServiceHandler) CreateAndStartWorkspace(ctx context.Cont
 	return connect_go.NewResponse(resp), nil
 }
 
+func (s *ProxyWorkspacesServiceHandler) StartWorkspace(ctx context.Context, req *connect_go.Request[v1.StartWorkspaceRequest]) (*connect_go.Response[v1.StartWorkspaceResponse], error) {
+	resp, err := s.Client.StartWorkspace(ctx, req.Msg)
+	if err != nil {
+		// TODO(milan): Convert to correct status code
+		return nil, err
+	}
+
+	return connect_go.NewResponse(resp), nil
+}
+
 func (s *ProxyWorkspacesServiceHandler) StopWorkspace(ctx context.Context, req *connect_go.Request[v1.StopWorkspaceRequest]) (*connect_go.Response[v1.StopWorkspaceResponse], error) {
 	resp, err := s.Client.StopWorkspace(ctx, req.Msg)
 	if err != nil {
@@ -81,6 +91,26 @@ func (s *ProxyWorkspacesServiceHandler) DeleteWorkspace(ctx context.Context, req
 
 func (s *ProxyWorkspacesServiceHandler) UpdatePort(ctx context.Context, req *connect_go.Request[v1.UpdatePortRequest]) (*connect_go.Response[v1.UpdatePortResponse], error) {
 	resp, err := s.Client.UpdatePort(ctx, req.Msg)
+	if err != nil {
+		// TODO(milan): Convert to correct status code
+		return nil, err
+	}
+
+	return connect_go.NewResponse(resp), nil
+}
+
+func (s *ProxyWorkspacesServiceHandler) ListWorkspaceClasses(ctx context.Context, req *connect_go.Request[v1.ListWorkspaceClassesRequest]) (*connect_go.Response[v1.ListWorkspaceClassesResponse], error) {
+	resp, err := s.Client.ListWorkspaceClasses(ctx, req.Msg)
+	if err != nil {
+		// TODO(milan): Convert to correct status code
+		return nil, err
+	}
+
+	return connect_go.NewResponse(resp), nil
+}
+
+func (s *ProxyWorkspacesServiceHandler) GetDefaultWorkspaceImage(ctx context.Context, req *connect_go.Request[v1.GetDefaultWorkspaceImageRequest]) (*connect_go.Response[v1.GetDefaultWorkspaceImageResponse], error) {
+	resp, err := s.Client.GetDefaultWorkspaceImage(ctx, req.Msg)
 	if err != nil {
 		// TODO(milan): Convert to correct status code
 		return nil, err

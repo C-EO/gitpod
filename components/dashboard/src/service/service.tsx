@@ -11,14 +11,24 @@ import {
     GitpodServerPath,
     GitpodService,
     GitpodServiceImpl,
-    User,
-    WorkspaceInfo,
+    Disposable,
 } from "@gitpod/gitpod-protocol";
 import { WebSocketConnectionProvider } from "@gitpod/gitpod-protocol/lib/messaging/browser/connection";
 import { GitpodHostUrl } from "@gitpod/gitpod-protocol/lib/util/gitpod-host-url";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { IDEFrontendDashboardService } from "@gitpod/gitpod-protocol/lib/frontend-dashboard-service";
 import { RemoteTrackMessage } from "@gitpod/gitpod-protocol/lib/analytics";
+import { converter, helloService, stream, userClient, workspaceClient } from "./public-api";
+import { getExperimentsClient } from "../experiments/client";
+import { instrumentWebSocket } from "./metrics";
+import { LotsOfRepliesResponse } from "@gitpod/public-api/lib/gitpod/experimental/v1/dummy_pb";
+import { User } from "@gitpod/public-api/lib/gitpod/v1/user_pb";
+import {
+    WatchWorkspaceStatusPriority,
+    watchWorkspaceStatusInOrder,
+} from "../data/workspaces/listen-to-workspace-ws-messages2";
+import { Workspace, WorkspaceSpec_WorkspaceType, WorkspaceStatus } from "@gitpod/public-api/lib/gitpod/v1/workspace_pb";
+import { sendTrackEvent } from "../Analytics";
 
 export const gitpodHostUrl = new GitpodHostUrl(window.location.toString());
 
@@ -26,6 +36,7 @@ function createGitpodService<C extends GitpodClient, S extends GitpodServer>() {
     let host = gitpodHostUrl.asWebsocket().with({ pathname: GitpodServerPath }).withApi();
 
     const connectionProvider = new WebSocketConnectionProvider();
+    instrumentWebSocketConnection(connectionProvider);
     let numberOfErrors = 0;
     let onReconnect = () => {};
     const proxy = connectionProvider.createProxy<S>(host.toString(), undefined, {
@@ -49,17 +60,102 @@ function createGitpodService<C extends GitpodClient, S extends GitpodServer>() {
     return new GitpodServiceImpl<C, S>(proxy, { onReconnect });
 }
 
+function instrumentWebSocketConnection(connectionProvider: WebSocketConnectionProvider): void {
+    const originalCreateWebSocket = connectionProvider["createWebSocket"];
+    connectionProvider["createWebSocket"] = (url: string) => {
+        return originalCreateWebSocket.call(
+            connectionProvider,
+            url,
+            new Proxy(WebSocket, {
+                construct(target: any, argArray) {
+                    const webSocket = new target(...argArray);
+                    instrumentWebSocket(webSocket, "gitpod");
+                    return webSocket;
+                },
+            }),
+        );
+    };
+}
+
 export function getGitpodService(): GitpodService {
     const w = window as any;
     const _gp = w._gp || (w._gp = {});
-    if (window.location.search.includes("service=mock")) {
-        const service = _gp.gitpodService || (_gp.gitpodService = require("./service-mock").gitpodServiceMock);
-        return service;
+    let service = _gp.gitpodService;
+    if (!service) {
+        service = _gp.gitpodService = createGitpodService();
+        testPublicAPI(service);
     }
-    const service = _gp.gitpodService || (_gp.gitpodService = createGitpodService());
     return service;
 }
 
+/**
+ * Emulates getWorkspace calls and listen to workspace statuses with Public API.
+ * // TODO(ak): remove after reliability of Public API is confirmed
+ */
+function testPublicAPI(service: any): void {
+    let user: any;
+    service.server = new Proxy(service.server, {
+        get(target, propKey) {
+            return async function (...args: any[]) {
+                if (propKey === "getLoggedInUser") {
+                    user = await target[propKey](...args);
+                    return user;
+                }
+                if (propKey === "getWorkspace") {
+                    try {
+                        return await target[propKey](...args);
+                    } finally {
+                        // emulates frequent unary calls to public API
+                        const isTest = await getExperimentsClient().getValueAsync(
+                            "public_api_dummy_reliability_test",
+                            false,
+                            {
+                                user,
+                                gitpodHost: window.location.host,
+                            },
+                        );
+                        if (isTest) {
+                            helloService.sayHello({}).catch((e) => console.error(e));
+                        }
+                    }
+                }
+                return target[propKey](...args);
+            };
+        },
+    });
+    (async () => {
+        let previousCount = 0;
+        const watchLotsOfReplies = () =>
+            stream<LotsOfRepliesResponse>(
+                (options) => {
+                    return helloService.lotsOfReplies({ previousCount }, options);
+                },
+                (response) => {
+                    previousCount = response.count;
+                },
+            );
+
+        // emulates server side streaming with public API
+        let watching: Disposable | undefined;
+        while (true) {
+            const isTest =
+                !!user &&
+                (await getExperimentsClient().getValueAsync("public_api_dummy_reliability_test", false, {
+                    user,
+                    gitpodHost: window.location.host,
+                }));
+            if (isTest) {
+                if (!watching) {
+                    watching = watchLotsOfReplies();
+                }
+            } else if (watching) {
+                watching.dispose();
+                watching = undefined;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
+    })();
+}
 let ideFrontendService: IDEFrontendService | undefined;
 export function getIDEFrontendService(workspaceID: string, sessionId: string, service: GitpodService) {
     if (!ideFrontendService) {
@@ -73,8 +169,10 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
     private ownerId: string | undefined;
     private user: User | undefined;
     private ideCredentials!: string;
+    private workspace!: Workspace;
+    private isDesktopIDE: boolean = false;
 
-    private latestInfo?: IDEFrontendDashboardService.Status;
+    private latestInfo?: IDEFrontendDashboardService.Info;
 
     private readonly onDidChangeEmitter = new Emitter<IDEFrontendDashboardService.SetStateData>();
     readonly onSetState = this.onDidChangeEmitter.event;
@@ -86,6 +184,7 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
         private clientWindow: Window,
     ) {
         this.processServerInfo();
+        this.sendFeatureFlagsUpdate();
         window.addEventListener("message", (event: MessageEvent) => {
             if (IDEFrontendDashboardService.isTrackEventData(event.data)) {
                 this.trackEvent(event.data.msg);
@@ -95,9 +194,15 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
             }
             if (IDEFrontendDashboardService.isSetStateEventData(event.data)) {
                 this.onDidChangeEmitter.fire(event.data.state);
+                if (event.data.state.desktopIDE) {
+                    this.isDesktopIDE = true;
+                }
             }
             if (IDEFrontendDashboardService.isOpenDesktopIDE(event.data)) {
                 this.openDesktopIDE(event.data.url);
+            }
+            if (IDEFrontendDashboardService.isFeatureFlagsRequestEventData(event.data)) {
+                this.sendFeatureFlagsUpdate();
             }
         });
         window.addEventListener("unload", () => {
@@ -105,6 +210,10 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
                 return;
             }
             if (this.ownerId !== this.user?.id) {
+                return;
+            }
+            // we only send the close heartbeat if we are in a web IDE
+            if (this.isDesktopIDE) {
                 return;
             }
             // send last heartbeat (wasClosed: true)
@@ -117,15 +226,18 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
     }
 
     private async processServerInfo() {
-        const [user, listener, ideCredentials] = await Promise.all([
-            this.service.server.getLoggedInUser(),
-            this.service.listenToInstance(this.workspaceID),
-            this.service.server.getIDECredentials(this.workspaceID),
+        const [user, workspaceResponse, ideCredentials] = await Promise.all([
+            userClient.getAuthenticatedUser({}).then((r) => r.user),
+            workspaceClient.getWorkspace({ workspaceId: this.workspaceID }),
+            workspaceClient
+                .getWorkspaceEditorCredentials({ workspaceId: this.workspaceID })
+                .then((resp) => resp.editorCredentials),
         ]);
+        this.workspace = workspaceResponse.workspace!;
         this.user = user;
         this.ideCredentials = ideCredentials;
-        const reconcile = () => {
-            const info = this.parseInfo(listener.info);
+        const reconcile = async (status?: WorkspaceStatus) => {
+            const info = this.parseInfo(status ?? this.workspace.status!);
             this.latestInfo = info;
             const oldInstanceID = this.instanceID;
             this.instanceID = info.instanceId;
@@ -135,27 +247,70 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
                 this.auth();
             }
 
-            // TODO(hw): to be removed after IDE deployed
-            this.sendStatusUpdate(this.latestInfo);
-            // TODO(hw): end of todo
+            // Redirect to custom url
+            if (
+                (info.statusPhase === "stopping" || info.statusPhase === "stopped") &&
+                info.workspaceType === "regular"
+            ) {
+                await this.redirectToCustomUrl(info);
+            }
+
             this.sendInfoUpdate(this.latestInfo);
         };
         reconcile();
-        listener.onDidChange(reconcile);
+        watchWorkspaceStatusInOrder(this.workspaceID, WatchWorkspaceStatusPriority.SupervisorService, (response) => {
+            if (response.status) {
+                reconcile(response.status);
+            }
+        });
     }
 
-    private parseInfo(workspace: WorkspaceInfo): IDEFrontendDashboardService.Info {
+    private parseInfo(status: WorkspaceStatus): IDEFrontendDashboardService.Info {
         return {
             loggedUserId: this.user!.id,
             workspaceID: this.workspaceID,
-            instanceId: workspace.latestInstance?.id,
-            ideUrl: workspace.latestInstance?.ideUrl,
-            statusPhase: workspace.latestInstance?.status.phase,
-            workspaceDescription: workspace.workspace.description,
-            workspaceType: workspace.workspace.type,
+            instanceId: status.instanceId,
+            ideUrl: status.workspaceUrl,
+            statusPhase: status.phase?.name ? converter.fromPhase(status.phase?.name) : "unknown",
+            workspaceDescription: this.workspace.metadata?.name ?? "",
+            workspaceType: this.workspace.spec?.type === WorkspaceSpec_WorkspaceType.PREBUILD ? "prebuild" : "regular",
             credentialsToken: this.ideCredentials,
-            ownerId: workspace.workspace.ownerId,
+            ownerId: this.workspace.metadata?.ownerId ?? "",
         };
+    }
+
+    private async redirectToCustomUrl(info: IDEFrontendDashboardService.Info) {
+        const isDataOps = await getExperimentsClient().getValueAsync("dataops", false, {
+            user: { id: this.user!.id },
+            gitpodHost: gitpodHostUrl.toString(),
+        });
+        const dataOpsRedirectUrl = await getExperimentsClient().getValueAsync("dataops_redirect_url", "undefined", {
+            user: { id: this.user!.id },
+            gitpodHost: gitpodHostUrl.toString(),
+        });
+
+        if (!isDataOps) {
+            return;
+        }
+
+        try {
+            const params: Record<string, string> = { workspaceID: info.workspaceID };
+            let redirectURL: string;
+            if (dataOpsRedirectUrl === "undefined") {
+                redirectURL = this.workspace.metadata?.originalContextUrl ?? "";
+            } else {
+                redirectURL = dataOpsRedirectUrl;
+                params.contextURL = this.workspace.metadata?.originalContextUrl ?? "";
+            }
+            const url = new URL(redirectURL);
+            url.search = new URLSearchParams([
+                ...Array.from(url.searchParams.entries()),
+                ...Object.entries(params),
+            ]).toString();
+            this.relocate(url.toString());
+        } catch {
+            console.error("Invalid redirect URL");
+        }
     }
 
     // implements
@@ -178,12 +333,12 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
             workspaceId: this.workspaceID,
             type: this.latestInfo?.workspaceType,
         };
-        this.service.server.trackEvent(msg);
+        sendTrackEvent(msg);
     }
 
     private activeHeartbeat(): void {
-        if (this.instanceID) {
-            this.service.server.sendHeartBeat({ instanceId: this.instanceID });
+        if (this.workspaceID) {
+            workspaceClient.sendHeartBeat({ workspaceId: this.workspaceID });
         }
     }
 
@@ -191,7 +346,17 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
         let redirect = false;
         try {
             const desktopLink = new URL(url);
-            redirect = desktopLink.protocol !== "http:" && desktopLink.protocol !== "https:";
+            // allow to redirect only for whitelisted trusted protocols
+            // IDE-69
+            const trustedProtocols = ["vscode:", "vscode-insiders:", "jetbrains-gateway:", "jetbrains:"];
+            redirect = trustedProtocols.includes(desktopLink.protocol);
+            if (
+                redirect &&
+                desktopLink.protocol === "jetbrains:" &&
+                !desktopLink.href.startsWith("jetbrains://gateway/io.gitpod.toolbox.gateway/")
+            ) {
+                redirect = false;
+            }
         } catch (e) {
             console.error("invalid desktop link:", e);
         }
@@ -204,19 +369,6 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
         }
     }
 
-    // TODO(hw): to be removed after IDE deployed
-    sendStatusUpdate(status: IDEFrontendDashboardService.Status): void {
-        this.clientWindow.postMessage(
-            {
-                version: 1,
-                type: "ide-status-update",
-                status,
-            } as IDEFrontendDashboardService.StatusUpdateEventData,
-            "*",
-        );
-    }
-    // TODO(hw): end of todo
-
     sendInfoUpdate(info: IDEFrontendDashboardService.Info): void {
         this.clientWindow.postMessage(
             {
@@ -224,6 +376,23 @@ export class IDEFrontendService implements IDEFrontendDashboardService.IServer {
                 type: "ide-info-update",
                 info,
             } as IDEFrontendDashboardService.InfoUpdateEventData,
+            "*",
+        );
+    }
+
+    private async sendFeatureFlagsUpdate() {
+        const supervisor_check_ready_retry = await getExperimentsClient().getValueAsync(
+            "supervisor_check_ready_retry",
+            false,
+            {
+                gitpodHost: gitpodHostUrl.toString(),
+            },
+        );
+        this.clientWindow.postMessage(
+            {
+                type: "ide-feature-flag-update",
+                flags: { supervisor_check_ready_retry },
+            } as IDEFrontendDashboardService.FeatureFlagsUpdateEventData,
             "*",
         );
     }

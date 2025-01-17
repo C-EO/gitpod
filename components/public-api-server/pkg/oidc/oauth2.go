@@ -19,10 +19,12 @@ type OAuth2Result struct {
 }
 
 type StateParams struct {
-	// Internal client config ID
+	// Gitpod's client config ID, not to be confused with OAuth `clientID`
 	ClientConfigID string `json:"clientConfigId"`
 	ReturnToURL    string `json:"returnTo"`
 	Activate       bool   `json:"activate"`
+	Verify         bool   `json:"verify"`
+	UseHttpErrors  bool   `json:"useHttpErrors"`
 }
 
 type keyOAuth2Result struct{}
@@ -42,7 +44,7 @@ func GetOAuth2ResultFromContext(ctx context.Context) *OAuth2Result {
 
 func (s *Service) OAuth2Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		config, _, err := s.GetClientConfigFromCallbackRequest(r)
+		config, _, err := s.getClientConfigFromCallbackRequest(r)
 		if err != nil {
 			log.Warn("client config not found: " + err.Error())
 			http.Error(rw, "config not found", http.StatusNotFound)
@@ -72,17 +74,31 @@ func (s *Service) OAuth2Middleware(next http.Handler) http.Handler {
 			http.Error(rw, "bad state param", http.StatusBadRequest)
 			return
 		}
+		useHttpErrors := state.UseHttpErrors
 
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			http.Error(rw, "code param not found", http.StatusBadRequest)
+			log.Warn("'code' parameter not found.")
+			respondeWithError(rw, r, "'code' parameter not found.", http.StatusInternalServerError, useHttpErrors)
 			return
 		}
 
+		opts := []oauth2.AuthCodeOption{}
+		if config.UsePKCE {
+			codeVerifier, err := r.Cookie(verifierCookieName)
+			if err != nil {
+				http.Error(rw, "code_verifier cookie not found", http.StatusBadRequest)
+				return
+			}
+			opts = append(opts, oauth2.VerifierOption(codeVerifier.Value))
+		}
+
 		config.OAuth2Config.RedirectURL = getCallbackURL(r.Host)
-		oauth2Token, err := config.OAuth2Config.Exchange(r.Context(), code)
+		oauth2Token, err := config.OAuth2Config.Exchange(r.Context(), code, opts...)
 		if err != nil {
-			http.Error(rw, "failed to exchange token: "+err.Error(), http.StatusInternalServerError)
+			log.WithError(err).Warn("Failed to exchange OAuth2 token.")
+			respondeWithError(rw, r, "Failed to exchange OAuth2 token: "+err.Error(), http.StatusInternalServerError, useHttpErrors)
 			return
 		}
 

@@ -5,11 +5,14 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -35,6 +38,7 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/util"
 	gitpod "github.com/gitpod-io/gitpod/gitpod-protocol"
+	"github.com/gitpod-io/gitpod/jetbrains/launcher/pkg/constant"
 	supervisor "github.com/gitpod-io/gitpod/supervisor/api"
 )
 
@@ -43,8 +47,6 @@ const defaultBackendPort = "63342"
 var (
 	// ServiceName is the name we use for tracing/logging.
 	ServiceName = "jetbrains-launcher"
-	// Version of this service - set during build.
-	Version = ""
 )
 
 type LaunchContext struct {
@@ -55,6 +57,7 @@ type LaunchContext struct {
 	label  string
 	warmup bool
 
+	preferToolbox  bool
 	qualifier      string
 	productDir     string
 	backendDir     string
@@ -62,34 +65,55 @@ type LaunchContext struct {
 	backendVersion *version.Version
 	wsInfo         *supervisor.WorkspaceInfoResponse
 
-	vmOptionsFile     string
-	projectDir        string
-	configDir         string
-	systemDir         string
-	projectConfigDir  string
-	projectContextDir string
-	riderSolutionFile string
+	vmOptionsFile          string
+	platformPropertiesFile string
+	projectDir             string
+	configDir              string
+	systemDir              string
+	projectContextDir      string
+	riderSolutionFile      string
 
 	env []string
+
+	// Custom fields
+
+	// shouldWaitBackendPlugin is controlled by env GITPOD_WAIT_IDE_BACKEND
+	shouldWaitBackendPlugin bool
+}
+
+func (c *LaunchContext) getCommonJoinLinkResponse(appPid int, joinLink string) *JoinLinkResponse {
+	return &JoinLinkResponse{
+		AppPid:      appPid,
+		JoinLink:    joinLink,
+		IDEVersion:  fmt.Sprintf("%s-%s", c.info.ProductCode, c.info.BuildNumber),
+		ProjectPath: c.projectContextDir,
+	}
 }
 
 // JB startup entrypoint
 func main() {
-	log.Init(ServiceName, Version, true, false)
-
 	if len(os.Args) == 3 && os.Args[1] == "env" && os.Args[2] != "" {
 		var mark = os.Args[2]
 		content, err := json.Marshal(os.Environ())
+		exitStatus := 0
 		if err != nil {
-			log.WithError(err).Fatal()
+			fmt.Fprintf(os.Stderr, "%s", err)
+			exitStatus = 1
 		}
 		fmt.Printf("%s%s%s", mark, content, mark)
+		os.Exit(exitStatus)
 		return
 	}
 
-	log.Info(ServiceName + ": " + Version)
+	// supervisor refer see https://github.com/gitpod-io/gitpod/blob/main/components/supervisor/pkg/supervisor/supervisor.go#L961
+	shouldWaitBackendPlugin := os.Getenv("GITPOD_WAIT_IDE_BACKEND") == "true"
+	debugEnabled := os.Getenv("SUPERVISOR_DEBUG_ENABLE") == "true"
+	preferToolbox := os.Getenv("GITPOD_PREFER_TOOLBOX") == "true"
+	log.Init(ServiceName, constant.Version, true, debugEnabled)
+	log.Info(ServiceName + ": " + constant.Version)
 	startTime := time.Now()
 
+	log.WithField("shouldWait", shouldWaitBackendPlugin).Info("should wait backend plugin")
 	var port string
 	var warmup bool
 
@@ -152,19 +176,29 @@ func main() {
 		alias:  alias,
 		label:  label,
 
-		qualifier:      qualifier,
-		productDir:     productDir,
-		backendDir:     backendDir,
-		info:           info,
-		backendVersion: backendVersion,
-		wsInfo:         wsInfo,
+		preferToolbox:           preferToolbox,
+		qualifier:               qualifier,
+		productDir:              productDir,
+		backendDir:              backendDir,
+		info:                    info,
+		backendVersion:          backendVersion,
+		wsInfo:                  wsInfo,
+		shouldWaitBackendPlugin: shouldWaitBackendPlugin,
 	}
 
 	if launchCtx.warmup {
-		waitForTasksToFinish()
 		launch(launchCtx)
 		return
 	}
+
+	if preferToolbox {
+		err = configureToolboxCliProperties(backendDir)
+		if err != nil {
+			log.WithError(err).Error("failed to write toolbox cli config file")
+			return
+		}
+	}
+
 	// we should start serving immediately and postpone launch
 	// in order to enable a JB Gateway to connect as soon as possible
 	go launch(launchCtx)
@@ -237,6 +271,19 @@ func serve(launchCtx *LaunchContext) {
 		}
 		fmt.Fprint(w, jsonLink)
 	})
+	http.HandleFunc("/joinLink2", func(w http.ResponseWriter, r *http.Request) {
+		backendPort := r.URL.Query().Get("backendPort")
+		if backendPort == "" {
+			backendPort = defaultBackendPort
+		}
+		jsonResp, err := resolveJsonLink2(launchCtx, backendPort)
+		if err != nil {
+			log.WithError(err).Error("cannot resolve join link")
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		json.NewEncoder(w).Encode(jsonResp)
+	})
 	http.HandleFunc("/gatewayLink", func(w http.ResponseWriter, r *http.Request) {
 		backendPort := r.URL.Query().Get("backendPort")
 		if backendPort == "" {
@@ -251,9 +298,29 @@ func serve(launchCtx *LaunchContext) {
 		fmt.Fprint(w, jsonLink)
 	})
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		if launchCtx.preferToolbox {
+			response := make(map[string]string)
+			toolboxLink, err := resolveToolboxLink(launchCtx.wsInfo)
+			if err != nil {
+				log.WithError(err).Error("cannot resolve toolbox link")
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			response["link"] = toolboxLink
+			response["label"] = launchCtx.label
+			response["clientID"] = "jetbrains-toolbox"
+			response["kind"] = launchCtx.alias
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(response)
+			return
+		}
 		backendPort := r.URL.Query().Get("backendPort")
 		if backendPort == "" {
 			backendPort = defaultBackendPort
+		}
+		if err := isBackendPluginReady(r.Context(), backendPort, launchCtx.shouldWaitBackendPlugin); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
 		}
 		gatewayLink, err := resolveGatewayLink(backendPort, launchCtx.wsInfo)
 		if err != nil {
@@ -276,6 +343,33 @@ func serve(launchCtx *LaunchContext) {
 	}
 }
 
+// isBackendPluginReady checks if the backend plugin is ready via backend plugin CLI GitpodCLIService.kt
+func isBackendPluginReady(ctx context.Context, backendPort string, shouldWaitBackendPlugin bool) error {
+	if !shouldWaitBackendPlugin {
+		log.Debug("will not wait plugin ready")
+		return nil
+	}
+	log.WithField("backendPort", backendPort).Debug("wait backend plugin to be ready")
+	// Use op=metrics so that we don't need to rebuild old backend-plugin
+	url, err := url.Parse("http://localhost:" + backendPort + "/api/gitpod/cli?op=metrics")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("backend plugin is not ready: %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func restart(r *http.Request) {
 	backendPort := r.URL.Query().Get("backendPort")
 	if backendPort == "" {
@@ -293,7 +387,33 @@ type Projects struct {
 	JoinLink string `json:"joinLink"`
 }
 type Response struct {
+	AppPid   int        `json:"appPid"`
+	JoinLink string     `json:"joinLink"`
 	Projects []Projects `json:"projects"`
+}
+type JoinLinkResponse struct {
+	AppPid   int    `json:"appPid"`
+	JoinLink string `json:"joinLink"`
+
+	// IDEVersion is the ideVersionHint that required by Toolbox to `setAutoConnectOnEnvironmentReady`
+	IDEVersion string `json:"ideVersion"`
+	// ProjectPath is the projectPathHint that required by Toolbox to `setAutoConnectOnEnvironmentReady`
+	ProjectPath string `json:"projectPath"`
+}
+
+func resolveToolboxLink(wsInfo *supervisor.WorkspaceInfoResponse) (string, error) {
+	gitpodUrl, err := url.Parse(wsInfo.GitpodHost)
+	if err != nil {
+		return "", err
+	}
+	debugWorkspace := wsInfo.DebugWorkspaceType != supervisor.DebugWorkspaceType_noDebug
+	link := url.URL{
+		Scheme:   "jetbrains",
+		Host:     "gateway",
+		Path:     "io.gitpod.toolbox.gateway/open-in-toolbox",
+		RawQuery: fmt.Sprintf("host=%s&workspaceId=%s&debugWorkspace=%t", gitpodUrl.Hostname(), wsInfo.WorkspaceId, debugWorkspace),
+	}
+	return link.String(), nil
 }
 
 func resolveGatewayLink(backendPort string, wsInfo *supervisor.WorkspaceInfoResponse) (string, error) {
@@ -320,7 +440,7 @@ func resolveJsonLink(backendPort string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
@@ -332,10 +452,42 @@ func resolveJsonLink(backendPort string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(jsonResp.Projects) != 1 {
-		return "", xerrors.Errorf("project is not found")
+	if len(jsonResp.Projects) > 0 {
+		return jsonResp.Projects[0].JoinLink, nil
 	}
-	return jsonResp.Projects[0].JoinLink, nil
+	return jsonResp.JoinLink, nil
+}
+
+func resolveJsonLink2(launchCtx *LaunchContext, backendPort string) (*JoinLinkResponse, error) {
+	var (
+		hostStatusUrl = "http://localhost:" + backendPort + "/codeWithMe/unattendedHostStatus?token=gitpod"
+		client        = http.Client{Timeout: 1 * time.Second}
+	)
+	resp, err := client.Get(hostStatusUrl)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, xerrors.Errorf("failed to resolve project status: %s (%d)", bodyBytes, resp.StatusCode)
+	}
+	jsonResp := &Response{}
+	err = json.Unmarshal(bodyBytes, &jsonResp)
+	if err != nil {
+		return nil, err
+	}
+	if len(jsonResp.Projects) > 0 {
+		return launchCtx.getCommonJoinLinkResponse(jsonResp.AppPid, jsonResp.Projects[0].JoinLink), nil
+	}
+	if len(jsonResp.JoinLink) > 0 {
+		return launchCtx.getCommonJoinLinkResponse(jsonResp.AppPid, jsonResp.JoinLink), nil
+	}
+	log.Error("failed to resolve JetBrains JoinLink")
+	return nil, xerrors.Errorf("failed to resolve JoinLink")
 }
 
 func terminateIDE(backendPort string) error {
@@ -411,30 +563,37 @@ func launch(launchCtx *LaunchContext) {
 		}
 	}
 
-	configDir := fmt.Sprintf("/workspace/.config/JetBrains%s", launchCtx.qualifier)
 	launchCtx.projectDir = projectDir
-	launchCtx.configDir = configDir
-	launchCtx.systemDir = fmt.Sprintf("/workspace/.cache/JetBrains%s", launchCtx.qualifier)
+	launchCtx.configDir = fmt.Sprintf("/workspace/.config/JetBrains%s/RemoteDev-%s", launchCtx.qualifier, launchCtx.info.ProductCode)
+	launchCtx.systemDir = fmt.Sprintf("/workspace/.cache/JetBrains%s/RemoteDev-%s", launchCtx.qualifier, launchCtx.info.ProductCode)
 	launchCtx.riderSolutionFile = riderSolutionFile
 	launchCtx.projectContextDir = resolveProjectContextDir(launchCtx)
-	launchCtx.projectConfigDir = fmt.Sprintf("%s/RemoteDev-%s/%s", configDir, launchCtx.info.ProductCode, strings.ReplaceAll(launchCtx.projectContextDir, "/", "_"))
 
-	// sync initial options
-	err = syncOptions(launchCtx)
+	launchCtx.platformPropertiesFile = launchCtx.backendDir + "/bin/idea.properties"
+	_, err = configurePlatformProperties(launchCtx.platformPropertiesFile, launchCtx.configDir, launchCtx.systemDir)
+	if err != nil {
+		log.WithError(err).Error("failed to update platform properties file")
+	}
+
+	_, err = syncInitialContent(launchCtx, Options)
 	if err != nil {
 		log.WithError(err).Error("failed to sync initial options")
 	}
 
+	launchCtx.env = resolveLaunchContextEnv()
+
+	_, err = syncInitialContent(launchCtx, Plugins)
+	if err != nil {
+		log.WithError(err).Error("failed to sync initial plugins")
+	}
+
 	// install project plugins
-	version_2022_1, _ := version.NewVersion("2022.1")
-	if version_2022_1.LessThanOrEqual(launchCtx.backendVersion) {
-		err = installPlugins(gitpodConfig, launchCtx)
-		installPluginsCost := time.Now().Local().Sub(launchCtx.startTime).Milliseconds()
-		if err != nil {
-			log.WithError(err).WithField("cost", installPluginsCost).Error("installing repo plugins: done")
-		} else {
-			log.WithField("cost", installPluginsCost).Info("installing repo plugins: done")
-		}
+	err = installPlugins(gitpodConfig, launchCtx)
+	installPluginsCost := time.Now().Local().Sub(launchCtx.startTime).Milliseconds()
+	if err != nil {
+		log.WithError(err).WithField("cost", installPluginsCost).Error("installing repo plugins: done")
+	} else {
+		log.WithField("cost", installPluginsCost).Info("installing repo plugins: done")
 	}
 
 	// install gitpod plugin
@@ -451,6 +610,8 @@ func run(launchCtx *LaunchContext) {
 	var args []string
 	if launchCtx.warmup {
 		args = append(args, "warmup")
+	} else if launchCtx.preferToolbox {
+		args = append(args, "serverMode")
 	} else {
 		args = append(args, "run")
 	}
@@ -480,7 +641,7 @@ func run(launchCtx *LaunchContext) {
 }
 
 // resolveUserEnvs emulats the interactive login shell to ensure that all user defined shell scripts are loaded
-func resolveUserEnvs(launchCtx *LaunchContext) (userEnvs []string, err error) {
+func resolveUserEnvs() (userEnvs []string, err error) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/bash"
@@ -489,12 +650,28 @@ func resolveUserEnvs(launchCtx *LaunchContext) (userEnvs []string, err error) {
 	if err != nil {
 		return
 	}
-	envCmd := exec.Command(shell, []string{"-ilc", "/ide-desktop/jb-launcher env " + mark.String()}...)
-	envCmd.Stderr = os.Stderr
-	output, err := envCmd.Output()
+
+	self, err := os.Executable()
 	if err != nil {
 		return
 	}
+	envCmd := exec.Command(shell, []string{"-i", "-l", "-c", strings.Join([]string{self, "env", mark.String()}, " ")}...)
+	envCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	envCmd.Stderr = os.Stderr
+	envCmd.WaitDelay = 3 * time.Second
+	time.AfterFunc(8*time.Second, func() {
+		_ = syscall.Kill(-envCmd.Process.Pid, syscall.SIGKILL)
+	})
+
+	output, err := envCmd.Output()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// For some reason the command doesn't close it's I/O pipes but it already run successfully
+		// so just ignore this error
+		log.Warn("WaitDelay expired before envCmd I/O completed")
+	} else if err != nil {
+		return
+	}
+
 	markByte := []byte(mark.String())
 	start := bytes.Index(output, markByte)
 	if start == -1 {
@@ -515,31 +692,32 @@ func resolveUserEnvs(launchCtx *LaunchContext) (userEnvs []string, err error) {
 	return
 }
 
-func remoteDevServerCmd(args []string, launchCtx *LaunchContext) *exec.Cmd {
-	if launchCtx.env == nil {
-		userEnvs, err := resolveUserEnvs(launchCtx)
-		if err == nil {
-			launchCtx.env = append(launchCtx.env, userEnvs...)
-		} else {
-			log.WithError(err).Error("failed to resolve user env vars")
-			launchCtx.env = os.Environ()
-		}
-
-		// Set default config and system directories under /workspace to preserve between restarts
-		launchCtx.env = append(launchCtx.env,
-			// Set default config and system directories under /workspace to preserve between restarts
-			fmt.Sprintf("IJ_HOST_CONFIG_BASE_DIR=%s", launchCtx.configDir),
-			fmt.Sprintf("IJ_HOST_SYSTEM_BASE_DIR=%s", launchCtx.systemDir),
-		)
-
-		// instead put them into /ide-desktop/${alias}${qualifier}/backend/bin/idea64.vmoptions
-		// otherwise JB will complain to a user on each startup
-		// by default remote dev already set -Xmx2048m, see /ide-desktop/${alias}${qualifier}/backend/plugins/remote-dev-server/bin/launcher.sh
-		launchCtx.env = append(launchCtx.env, "JAVA_TOOL_OPTIONS=")
-
-		log.WithField("env", launchCtx.env).Debug("resolved launch env")
+func resolveLaunchContextEnv() []string {
+	var launchCtxEnv []string
+	userEnvs, err := resolveUserEnvs()
+	if err == nil {
+		launchCtxEnv = append(launchCtxEnv, userEnvs...)
+	} else {
+		log.WithError(err).Error("failed to resolve user env vars")
+		launchCtxEnv = os.Environ()
 	}
 
+	// instead put them into /ide-desktop/${alias}${qualifier}/backend/bin/idea64.vmoptions
+	// otherwise JB will complain to a user on each startup
+	// by default remote dev already set -Xmx2048m, see /ide-desktop/${alias}${qualifier}/backend/plugins/remote-dev-server/bin/launcher.sh
+	launchCtxEnv = append(launchCtxEnv, "INTELLIJ_ORIGINAL_ENV_JAVA_TOOL_OPTIONS="+os.Getenv("JAVA_TOOL_OPTIONS"))
+	launchCtxEnv = append(launchCtxEnv, "JAVA_TOOL_OPTIONS=")
+
+	// Force it to be disabled as we update platform properties file already
+	// TODO: Some ides have it enabled by default still, check pycharm and remove next release
+	launchCtxEnv = append(launchCtxEnv, "REMOTE_DEV_LEGACY_PER_PROJECT_CONFIGS=0")
+
+	log.WithField("env", strings.Join(launchCtxEnv, "\n")).Info("resolved launch env")
+
+	return launchCtxEnv
+}
+
+func remoteDevServerCmd(args []string, launchCtx *LaunchContext) *exec.Cmd {
 	cmd := exec.Command(launchCtx.backendDir+"/bin/remote-dev-server.sh", args...)
 	cmd.Env = launchCtx.env
 	cmd.Stderr = os.Stderr
@@ -559,6 +737,52 @@ func handleSignal() {
 	log.Info("asked IDE to terminate")
 }
 
+func configurePlatformProperties(platformOptionsPath string, configDir string, systemDir string) (bool, error) {
+	buffer, err := os.ReadFile(platformOptionsPath)
+	if err != nil {
+		return false, err
+	}
+
+	content := string(buffer)
+
+	updated, content := updatePlatformProperties(content, configDir, systemDir)
+
+	if updated {
+		return true, os.WriteFile(platformOptionsPath, []byte(content), 0)
+	}
+
+	return false, nil
+}
+
+func updatePlatformProperties(content string, configDir string, systemDir string) (bool, string) {
+	lines := strings.Split(content, "\n")
+	configMap := make(map[string]bool)
+	for _, v := range lines {
+		v = strings.TrimSpace(v)
+		if v != "" && !strings.HasPrefix(v, "#") {
+			key, _, found := strings.Cut(v, "=")
+			if found {
+				configMap[key] = true
+			}
+		}
+	}
+
+	updated := false
+
+	if _, found := configMap["idea.config.path"]; !found {
+		updated = true
+		content = strings.Join([]string{
+			content,
+			fmt.Sprintf("idea.config.path=%s", configDir),
+			fmt.Sprintf("idea.plugins.path=%s", configDir+"/plugins"),
+			fmt.Sprintf("idea.system.path=%s", systemDir),
+			fmt.Sprintf("idea.log.path=%s", systemDir+"/log"),
+		}, "\n")
+	}
+
+	return updated, content
+}
+
 func configureVMOptions(config *gitpod.GitpodConfig, alias string, vmOptionsPath string) error {
 	options, err := readVMOptions(vmOptionsPath)
 	if err != nil {
@@ -569,7 +793,7 @@ func configureVMOptions(config *gitpod.GitpodConfig, alias string, vmOptionsPath
 }
 
 func readVMOptions(vmOptionsPath string) ([]string, error) {
-	content, err := ioutil.ReadFile(vmOptionsPath)
+	content, err := os.ReadFile(vmOptionsPath)
 	if err != nil {
 		return nil, err
 	}
@@ -579,7 +803,7 @@ func readVMOptions(vmOptionsPath string) ([]string, error) {
 func writeVMOptions(vmOptionsPath string, vmoptions []string) error {
 	// vmoptions file should end with a newline
 	content := strings.Join(vmoptions, "\n") + "\n"
-	return ioutil.WriteFile(vmOptionsPath, []byte(content), 0)
+	return os.WriteFile(vmOptionsPath, []byte(content), 0)
 }
 
 // deduplicateVMOption append new VMOptions onto old VMOptions and remove any duplicated leftmost options
@@ -619,8 +843,19 @@ func updateVMOptions(
 	// Gitpod's default customization
 	var gitpodVMOptions []string
 	gitpodVMOptions = append(gitpodVMOptions, "-Dgtw.disable.exit.dialog=true")
+	// temporary disable auto-attach of the async-profiler to prevent JVM crash
+	// see https://youtrack.jetbrains.com/issue/IDEA-326201/SIGSEGV-on-startup-2023.2-IDE-backend-on-gitpod.io?s=SIGSEGV-on-startup-2023.2-IDE-backend-on-gitpod.io
+	gitpodVMOptions = append(gitpodVMOptions, "-Dfreeze.reporter.profiling=false")
 	if alias == "intellij" {
 		gitpodVMOptions = append(gitpodVMOptions, "-Djdk.configure.existing=true")
+	}
+	// container relevant options
+	gitpodVMOptions = append(gitpodVMOptions, "-XX:+UseContainerSupport")
+	cpuCount := os.Getenv("GITPOD_CPU_COUNT")
+	parsedCPUCount, err := strconv.Atoi(cpuCount)
+	// if CPU count is set and is parseable as a positive number
+	if err == nil && parsedCPUCount > 0 && parsedCPUCount <= 16 {
+		gitpodVMOptions = append(gitpodVMOptions, "-XX:ActiveProcessorCount="+cpuCount)
 	}
 	vmoptions := deduplicateVMOption(ideaVMOptionsLines, gitpodVMOptions, filterFunc)
 
@@ -667,6 +902,7 @@ func updateVMOptions(
 	}
 */
 type ProductInfo struct {
+	BuildNumber string `json:"buildNumber"`
 	Version     string `json:"version"`
 	ProductCode string `json:"productCode"`
 }
@@ -687,17 +923,111 @@ func resolveProductInfo(backendDir string) (*ProductInfo, error) {
 	return &info, err
 }
 
-func syncOptions(launchCtx *LaunchContext) error {
-	userHomeDir, err := os.UserHomeDir()
+type SyncTarget string
+
+const (
+	Options SyncTarget = "options"
+	Plugins SyncTarget = "plugins"
+)
+
+func syncInitialContent(launchCtx *LaunchContext, target SyncTarget) (bool, error) {
+	destDir, err, alreadySynced := ensureInitialSyncDest(launchCtx, target)
+	if alreadySynced {
+		log.Infof("initial %s is already synced, skipping", target)
+		return alreadySynced, nil
+	}
+	if err != nil {
+		return alreadySynced, err
+	}
+
+	srcDirs, err := collectSyncSources(launchCtx, target)
+	if err != nil {
+		return alreadySynced, err
+	}
+	if len(srcDirs) == 0 {
+		// nothing to sync
+		return alreadySynced, nil
+	}
+
+	for _, srcDir := range srcDirs {
+		if target == Plugins {
+			files, err := ioutil.ReadDir(srcDir)
+			if err != nil {
+				return alreadySynced, err
+			}
+
+			for _, file := range files {
+				err := syncPlugin(file, srcDir, destDir)
+				if err != nil {
+					log.WithError(err).WithField("file", file.Name()).WithField("srcDir", srcDir).WithField("destDir", destDir).Error("failed to sync plugin")
+				}
+			}
+		} else {
+			cp := exec.Command("cp", "-rf", srcDir+"/.", destDir)
+			err = cp.Run()
+			if err != nil {
+				return alreadySynced, err
+			}
+		}
+	}
+	return alreadySynced, nil
+}
+
+func syncPlugin(file fs.FileInfo, srcDir, destDir string) error {
+	if file.IsDir() {
+		_, err := os.Stat(filepath.Join(destDir, file.Name()))
+		if !os.IsNotExist(err) {
+			log.WithField("plugin", file.Name()).Info("plugin is already synced, skipping")
+			return nil
+		}
+		return exec.Command("cp", "-rf", filepath.Join(srcDir, file.Name()), destDir).Run()
+	}
+	if filepath.Ext(file.Name()) != ".zip" {
+		return nil
+	}
+	archiveFile := filepath.Join(srcDir, file.Name())
+	rootDir, err := getRootDirFromArchive(archiveFile)
 	if err != nil {
 		return err
 	}
+	_, err = os.Stat(filepath.Join(destDir, rootDir))
+	if !os.IsNotExist(err) {
+		log.WithField("plugin", rootDir).Info("plugin is already synced, skipping")
+		return nil
+	}
+	return unzipArchive(archiveFile, destDir)
+}
+
+func ensureInitialSyncDest(launchCtx *LaunchContext, target SyncTarget) (string, error, bool) {
+	targetDestDir := launchCtx.configDir
+	if target == Plugins {
+		targetDestDir = launchCtx.backendDir
+	}
+	destDir := fmt.Sprintf("%s/%s", targetDestDir, target)
+	if target == Options {
+		_, err := os.Stat(destDir)
+		if !os.IsNotExist(err) {
+			return "", nil, true
+		}
+		err = os.MkdirAll(destDir, os.ModePerm)
+		if err != nil {
+			return "", err, false
+		}
+	}
+	return destDir, nil, false
+}
+
+func collectSyncSources(launchCtx *LaunchContext, target SyncTarget) ([]string, error) {
+	userHomeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
 	var srcDirs []string
 	for _, srcDir := range []string{
-		fmt.Sprintf("%s/.gitpod/jetbrains/options", userHomeDir),
-		fmt.Sprintf("%s/.gitpod/jetbrains/%s/options", userHomeDir, launchCtx.alias),
-		fmt.Sprintf("%s/.gitpod/jetbrains/options", launchCtx.projectDir),
-		fmt.Sprintf("%s/.gitpod/jetbrains/%s/options", launchCtx.projectDir, launchCtx.alias),
+		fmt.Sprintf("%s/.gitpod/jetbrains/%s", userHomeDir, target),
+		fmt.Sprintf("%s/.gitpod/jetbrains/%s/%s", userHomeDir, launchCtx.alias, target),
+		fmt.Sprintf("%s/.gitpod/jetbrains/%s", launchCtx.projectDir, target),
+		fmt.Sprintf("%s/.gitpod/jetbrains/%s/%s", launchCtx.projectDir, launchCtx.alias, target),
 	} {
 		srcStat, err := os.Stat(srcDir)
 		if os.IsNotExist(err) {
@@ -705,34 +1035,68 @@ func syncOptions(launchCtx *LaunchContext) error {
 			continue
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !srcStat.IsDir() {
-			return fmt.Errorf("%s is not a directory", srcDir)
+			return nil, fmt.Errorf("%s is not a directory", srcDir)
 		}
 		srcDirs = append(srcDirs, srcDir)
 	}
-	if len(srcDirs) == 0 {
-		// nothing to sync
-		return nil
+	return srcDirs, nil
+}
+
+func getRootDirFromArchive(zipPath string) (string, error) {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+
+	if len(r.File) == 0 {
+		return "", fmt.Errorf("empty archive")
 	}
 
-	destDir := fmt.Sprintf("%s/options", launchCtx.projectConfigDir)
-	_, err = os.Stat(destDir)
-	if !os.IsNotExist(err) {
-		// already synced skipping, i.e. restart of jb backend
-		return nil
-	}
-	err = os.MkdirAll(destDir, os.ModePerm)
+	// Assuming the first file in the zip is the root directory or a file in the root directory
+	return strings.SplitN(r.File[0].Name, "/", 2)[0], nil
+}
+
+func unzipArchive(src, dest string) error {
+	r, err := zip.OpenReader(src)
 	if err != nil {
 		return err
 	}
+	defer r.Close()
 
-	for _, srcDir := range srcDirs {
-		cp := exec.Command("cp", "-rf", srcDir+"/.", destDir)
-		err = cp.Run()
+	for _, f := range r.File {
+		rc, err := f.Open()
 		if err != nil {
 			return err
+		}
+		defer rc.Close()
+
+		fpath := filepath.Join(dest, f.Name)
+		if f.FileInfo().IsDir() {
+			err := os.MkdirAll(fpath, os.ModePerm)
+			if err != nil {
+				return err
+			}
+		} else {
+			fdir := filepath.Dir(fpath)
+			err := os.MkdirAll(fdir, os.ModePerm)
+			if err != nil {
+				return err
+			}
+
+			outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, rc)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -755,8 +1119,8 @@ func installPlugins(config *gitpod.GitpodConfig, launchCtx *LaunchContext) error
 	installErr := cmd.Run()
 
 	// delete alien_plugins.txt to suppress 3rd-party plugins consent on startup to workaround backend startup freeze
-	err = os.Remove(launchCtx.projectConfigDir + "/alien_plugins.txt")
-	if err != nil {
+	err = os.Remove(launchCtx.configDir + "/alien_plugins.txt")
+	if err != nil && !os.IsNotExist(err) && !strings.Contains(err.Error(), "no such file or directory") {
 		log.WithError(err).Error("failed to suppress 3rd-party plugins consent")
 	}
 
@@ -817,20 +1181,34 @@ func getProductConfig(config *gitpod.GitpodConfig, alias string) *gitpod.Jetbrai
 }
 
 func linkRemotePlugin(launchCtx *LaunchContext) error {
-	remotePluginDir := launchCtx.backendDir + "/plugins/gitpod-remote"
-	_, err := os.Stat(remotePluginDir)
-	if err == nil || !errors.Is(err, os.ErrNotExist) {
-		return nil
+	remotePluginsFolder := launchCtx.configDir + "/plugins"
+	if launchCtx.info.Version == "2022.3.3" {
+		remotePluginsFolder = launchCtx.backendDir + "/plugins"
+	}
+	remotePluginDir := remotePluginsFolder + "/gitpod-remote"
+	if err := os.MkdirAll(remotePluginsFolder, 0755); err != nil {
+		return err
 	}
 
 	// added for backwards compatibility, can be removed in the future
 	sourceDir := "/ide-desktop-plugins/gitpod-remote-" + os.Getenv("JETBRAINS_BACKEND_QUALIFIER")
-	_, err = os.Stat(sourceDir)
+	_, err := os.Stat(sourceDir)
 	if err == nil {
-		return os.Symlink(sourceDir, remotePluginDir)
+		return safeLink(sourceDir, remotePluginDir)
 	}
 
-	return os.Symlink("/ide-desktop-plugins/gitpod-remote", remotePluginDir)
+	return safeLink("/ide-desktop-plugins/gitpod-remote", remotePluginDir)
+}
+
+// safeLink creates a symlink from source to target, removing the old target if it exists
+func safeLink(source, target string) error {
+	if _, err := os.Lstat(target); err == nil {
+		// unlink the old symlink
+		if err2 := os.RemoveAll(target); err2 != nil {
+			log.WithError(err).Error("failed to unlink old symlink")
+		}
+	}
+	return os.Symlink(source, target)
 }
 
 // TODO(andreafalzetti): remove dir scanning once this is implemented https://youtrack.jetbrains.com/issue/GTW-2402/Rider-Open-Project-dialog-not-displaying-in-remote-dev
@@ -873,65 +1251,40 @@ func resolveProjectContextDir(launchCtx *LaunchContext) string {
 	return launchCtx.projectDir
 }
 
-func waitForTasksToFinish() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var conn *grpc.ClientConn
-	var err error
-
-	for {
-		conn, err = dial(ctx)
-		if err == nil {
-			err = checkTasks(ctx, conn)
-		}
-
-		if err == nil {
-			return
-		}
-
-		log.WithError(err).Error("launcher: failed to check tasks status")
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(1 * time.Second):
-		}
-	}
-}
-
-func checkTasks(ctx context.Context, conn *grpc.ClientConn) error {
-	client := supervisor.NewStatusServiceClient(conn)
-	tasksResponse, err := client.TasksStatus(ctx, &supervisor.TasksStatusRequest{Observe: true})
+func configureToolboxCliProperties(backendDir string) error {
+	userHomeDir, err := os.UserHomeDir()
 	if err != nil {
-		return xerrors.Errorf("failed get tasks status client: %w", err)
+		return err
 	}
 
-	for {
-		var runningTasksCounter int
-
-		resp, err := tasksResponse.Recv()
-		if err != nil {
-			return err
-		}
-
-		for _, task := range resp.Tasks {
-			if task.State != supervisor.TaskState_closed && task.Presentation.Name != "GITPOD_JB_WARMUP_TASK" {
-				runningTasksCounter++
-			}
-		}
-		if runningTasksCounter == 0 {
-			break
-		}
+	toolboxCliPropertiesDir := fmt.Sprintf("%s/.local/share/JetBrains/Toolbox", userHomeDir)
+	_, err = os.Stat(toolboxCliPropertiesDir)
+	if !os.IsNotExist(err) {
+		return err
 	}
-
-	return nil
-}
-
-func dial(ctx context.Context) (*grpc.ClientConn, error) {
-	supervisorConn, err := grpc.DialContext(ctx, util.GetSupervisorAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	err = os.MkdirAll(toolboxCliPropertiesDir, os.ModePerm)
 	if err != nil {
-		err = xerrors.Errorf("failed connecting to supervisor: %w", err)
+		return err
 	}
-	return supervisorConn, err
+
+	toolboxCliPropertiesFilePath := fmt.Sprintf("%s/environment.json", toolboxCliPropertiesDir)
+
+	debuggingToolbox := os.Getenv("GITPOD_TOOLBOX_DEBUGGING")
+	allowInstallation := strconv.FormatBool(strings.Contains(debuggingToolbox, "allowInstallation"))
+
+	// TODO(hw): restrict IDE installation
+	content := fmt.Sprintf(`{
+    "tools": {
+        "allowInstallation": %s,
+        "allowUpdate": false,
+        "allowUninstallation": %s,
+        "location": [
+            {
+                "path": "%s"
+            }
+        ]
+    }
+}`, allowInstallation, allowInstallation, backendDir)
+
+	return os.WriteFile(toolboxCliPropertiesFilePath, []byte(content), 0o644)
 }

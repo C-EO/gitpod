@@ -9,6 +9,7 @@ import { Portal } from "react-portal";
 import { usePopper } from "react-popper";
 
 export interface TooltipProps {
+    className?: string;
     children: ReactNode;
     content: string;
     allowWrap?: boolean;
@@ -31,14 +32,14 @@ function Tooltip(props: TooltipProps) {
     }, [update, props.content]);
 
     // Adds a 500ms delay to showing tooltip so we don't show them until user pauses a bit like native browser tooltips
-    const handleMouseEnter = useCallback(() => {
+    const handleShow = useCallback(() => {
         const timeout = setTimeout(() => {
             setExpanded(true);
         }, 500);
         setShowTooltipTimeout(timeout);
     }, []);
 
-    const handleMouseLeave = useCallback(() => {
+    const handleHide = useCallback(() => {
         if (showTooltipTimeout) {
             clearTimeout(showTooltipTimeout);
         }
@@ -47,26 +48,31 @@ function Tooltip(props: TooltipProps) {
     }, [showTooltipTimeout]);
 
     return (
-        <>
-            <span onMouseLeave={handleMouseLeave} onMouseEnter={handleMouseEnter} ref={setTriggerEl}>
-                {props.children}
-                {expanded ? (
-                    <Portal>
-                        <div
-                            ref={setTooltipEl}
-                            style={styles.popper}
-                            className={
-                                `max-w-md z-50 py-1 px-2 bg-gray-900 text-gray-100 text-sm absolute flex flex-col border border-gray-200 dark:border-gray-800 rounded-md truncated ` +
-                                (props.allowWrap ? "whitespace-normal" : "whitespace-nowrap")
-                            }
-                            {...attributes.popper}
-                        >
-                            {props.content}
-                        </div>
-                    </Portal>
-                ) : null}
-            </span>
-        </>
+        <span
+            onMouseEnter={handleShow}
+            onFocus={handleShow}
+            onMouseLeave={handleHide}
+            onBlur={handleHide}
+            ref={setTriggerEl}
+            className={props.className}
+        >
+            {props.children}
+            {expanded ? (
+                <Portal>
+                    <div
+                        ref={setTooltipEl}
+                        style={styles.popper}
+                        className={
+                            `max-w-md z-50 py-1 px-2 bg-gray-900 text-gray-100 text-sm absolute flex flex-col border border-gray-200 dark:border-gray-800 rounded-md truncated ` +
+                            (props.allowWrap ? "whitespace-normal" : "whitespace-nowrap")
+                        }
+                        {...attributes.popper}
+                    >
+                        {props.content}
+                    </div>
+                </Portal>
+            ) : null}
+        </span>
     );
 }
 

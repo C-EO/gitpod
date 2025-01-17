@@ -7,10 +7,15 @@ package common
 import (
 	"time"
 
+	"github.com/gitpod-io/gitpod/installer/pkg/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // This file exists to break cyclic-dependency errors
+
+var (
+	GitpodContainerRegistry = config.GitpodContainerRegistry
+)
 
 const (
 	AppName                     = "gitpod"
@@ -18,16 +23,14 @@ const (
 	CertManagerCAIssuer         = "gitpod-ca-issuer"
 	DockerRegistryURL           = "docker.io"
 	DockerRegistryName          = "registry"
-	GitpodContainerRegistry     = "eu.gcr.io/gitpod-core-dev/build"
 	InClusterDbSecret           = "mysql"
-	InClusterMessageQueueName   = "rabbitmq"
-	InClusterMessageQueueTLS    = "messagebus-certificates-secret-core"
 	KubeRBACProxyRepo           = "quay.io"
 	KubeRBACProxyImage          = "brancz/kube-rbac-proxy"
-	KubeRBACProxyTag            = "v0.12.0"
+	KubeRBACProxyTag            = "v0.15.0"
 	MinioServiceAPIPort         = 9000
 	MonitoringChart             = "monitoring"
 	ProxyComponent              = "proxy"
+	ProxyConfigcatPort          = 9547
 	ProxyContainerHTTPPort      = 80
 	ProxyContainerHTTPName      = "http"
 	ProxyContainerHTTPSPort     = 443
@@ -41,10 +44,10 @@ const (
 	ServerIAMSessionPort        = 9876
 	ServerInstallationAdminPort = 9000
 	ServerGRPCAPIPort           = 9877
+	ServerPublicAPIPort         = 3001
 	SystemNodeCritical          = "system-node-critical"
 	PublicApiComponent          = "public-api-server"
 	UsageComponent              = "usage"
-	WSManagerComponent          = "ws-manager"
 	WSManagerMk2Component       = "ws-manager-mk2"
 	WSManagerBridgeComponent    = "ws-manager-bridge"
 	WSProxyComponent            = "ws-proxy"
@@ -61,6 +64,13 @@ const (
 	AnnotationConfigChecksum    = "gitpod.io/checksum_config"
 	DatabaseConfigMountPath     = "/secrets/database-config"
 	AuthPKISecretName           = "auth-pki"
+	IDEServiceComponent         = "ide-service"
+	OpenVSXProxyComponent       = "openvsx-proxy"
+	DashboardComponent          = "dashboard"
+	IDEMetricsComponent         = "ide-metrics"
+	IDEMetricsPort              = 3000
+	IDEProxyComponent           = "ide-proxy"
+	IDEProxyPort                = 80
 )
 
 var (

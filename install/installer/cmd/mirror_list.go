@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
 	configv1 "github.com/gitpod-io/gitpod/installer/pkg/config/v1"
 	"github.com/spf13/cobra"
@@ -223,6 +223,10 @@ func generateMirrorList(cfgVersion string, cfg *configv1.Config) ([]mirrorListRe
 	for _, img := range rawImages {
 		// Ignore if the image equals the container registry
 		if img == common.GitpodContainerRegistry {
+			continue
+		}
+		// Ignore empty image
+		if img == "" {
 			continue
 		}
 		// Dedupe

@@ -4,6 +4,8 @@
  See License.AGPL.txt in the project root for license information.
 -->
 <idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+    </extensions>
     <extensions defaultExtensionNs="com.jetbrains">
     </extensions>
 </idea-plugin>

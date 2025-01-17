@@ -6,8 +6,7 @@
 
 import { PersonalAccessToken } from "@gitpod/public-api/lib/gitpod/experimental/v1/tokens_pb";
 import { useCallback, useEffect, useState } from "react";
-import { Redirect, useLocation } from "react-router";
-import { Link } from "react-router-dom";
+import { useLocation } from "react-router";
 import { personalAccessTokensService } from "../service/public-api";
 import { PageWithSettingsSubMenu } from "./PageWithSettingsSubMenu";
 import { settingsPathPersonalAccessTokenCreate, settingsPathPersonalAccessTokenEdit } from "./settings.routes";
@@ -22,15 +21,10 @@ import TokenEntry from "./TokenEntry";
 import ShowTokenModal from "./ShowTokenModal";
 import Pagination from "../Pagination/Pagination";
 import { Heading2, Subheading } from "../components/typography/headings";
-import { useFeatureFlag } from "../data/featureflag-query";
+import { Button } from "@podkit/buttons/Button";
+import { LinkButton } from "@podkit/buttons/LinkButton";
 
 export default function PersonalAccessTokens() {
-    const enablePersonalAccessTokens = useFeatureFlag("personalAccessTokensEnabled");
-
-    if (!enablePersonalAccessTokens) {
-        return <Redirect to="/" />;
-    }
-
     return (
         <div>
             <PageWithSettingsSubMenu>
@@ -46,12 +40,31 @@ export enum TokenAction {
     Delete = "DELETE",
 }
 
-export const TokenExpirationDays = [
-    { value: "7", label: "7 Days" },
-    { value: "30", label: "30 Days" },
-    { value: "60", label: "60 Days" },
-    { value: "180", label: "180 Days" },
-];
+const expirationOptions = [7, 30, 60, 180].map((d) => ({
+    label: `${d} Days`,
+    value: `${d} Days`,
+    getDate: () => dayjs().add(d, "days").toDate(),
+}));
+
+// Max value of timestamp(6) in mysql is 2038-01-19 03:14:17
+const NoExpiresDate = dayjs("2038-01-01T00:00:00+00:00").toDate();
+export function getTokenExpirationDays(showForever: boolean) {
+    if (!showForever) {
+        return expirationOptions;
+    }
+    return [...expirationOptions, { label: "No expiration", value: "No expiration", getDate: () => NoExpiresDate }];
+}
+
+export function isNeverExpired(date: Date) {
+    return date.getTime() >= NoExpiresDate.getTime();
+}
+
+export function getTokenExpirationDescription(date: Date) {
+    if (isNeverExpired(date)) {
+        return "The token will never expire!";
+    }
+    return `The token will expire on ${dayjs(date).format("MMM D, YYYY")}`;
+}
 
 export const AllPermissions: PermissionDetail[] = [
     {
@@ -149,14 +162,7 @@ function ListAccessTokensView() {
         <>
             <div className="flex items-center sm:justify-between mb-4">
                 <div>
-                    <Heading2>
-                        Access Tokens{" "}
-                        <PillLabel type="warn" className="font-semibold self-center py-0.5 px-1.5">
-                            <a href="https://www.gitpod.io/docs/references/gitpod-releases">
-                                <span className="text-xs">BETA</span>
-                            </a>
-                        </PillLabel>
-                    </Heading2>
+                    <Heading2 className="flex gap-4 items-center">Access Tokens</Heading2>
                     <Subheading>
                         Create or regenerate access tokens.{" "}
                         <a
@@ -167,75 +173,53 @@ function ListAccessTokensView() {
                         >
                             Learn more
                         </a>
-                        &nbsp;&middot;&nbsp;
-                        <a
-                            className="gp-link"
-                            href="https://github.com/gitpod-io/gitpod/issues/15433"
-                            target="_blank"
-                            rel="noreferrer"
-                        >
-                            Send feedback
-                        </a>
                     </Subheading>
                 </div>
                 {tokens.length > 0 && (
-                    <Link to={settingsPathPersonalAccessTokenCreate}>
-                        <button>New Access Token</button>
-                    </Link>
+                    <LinkButton href={settingsPathPersonalAccessTokenCreate}>New Access Token</LinkButton>
                 )}
             </div>
-            <>
-                {errorMsg.length > 0 && (
-                    <Alert type="error" className="mb-2">
-                        {errorMsg}
-                    </Alert>
-                )}
-            </>
-            <>
-                {tokenInfo && (
-                    <>
-                        <div className="p-4 mb-4 divide-y rounded-xl bg-gray-50 dark:bg-gray-800">
-                            <div className="pb-2">
-                                <div className="flex gap-2 content-center font-semibold text-gray-700 dark:text-gray-200">
-                                    <span>{tokenInfo.data.name}</span>
-                                    <PillLabel
-                                        type={tokenInfo.method === TokenAction.Create ? "success" : "info"}
-                                        className="py-0.5 px-1"
-                                    >
-                                        {tokenInfo.method.toUpperCase()}
-                                    </PillLabel>
-                                </div>
-                                <div className="text-gray-400 dark:text-gray-300">
-                                    <span>
-                                        Expires on{" "}
-                                        {dayjs(tokenInfo.data.expirationTime!.toDate()).format("MMM D, YYYY")}
-                                    </span>
-                                    <span> · </span>
-                                    <span>
-                                        Created on {dayjs(tokenInfo.data.createdAt!.toDate()).format("MMM D, YYYY")}
-                                    </span>
-                                </div>
-                            </div>
-                            <div className="pt-2">
-                                <div className="font-semibold text-gray-600 dark:text-gray-200">
-                                    Your New Access Token
-                                </div>
-                                <InputWithCopy
-                                    className="my-2 max-w-md"
-                                    value={tokenInfo.data.value}
-                                    tip="Copy Token"
-                                />
-                                <div className="mb-2 font-medium text-sm text-gray-500 dark:text-gray-300">
-                                    Make sure to copy your access token — you won't be able to access it again.
-                                </div>
-                                <button className="secondary" onClick={handleCopyToken}>
-                                    Copy Token to Clipboard
-                                </button>
-                            </div>
+            {errorMsg.length > 0 && (
+                <Alert type="error" className="mb-2">
+                    {errorMsg}
+                </Alert>
+            )}
+            {tokenInfo && (
+                <div className="p-4 mb-4 divide-y rounded-xl bg-gray-50 dark:bg-gray-800">
+                    <div className="pb-2">
+                        <div className="flex gap-2 content-center font-semibold text-gray-700 dark:text-gray-200">
+                            <span>{tokenInfo.data.name}</span>
+                            <PillLabel
+                                type={tokenInfo.method === TokenAction.Create ? "success" : "info"}
+                                className="py-0.5 px-1"
+                            >
+                                {tokenInfo.method.toUpperCase()}
+                            </PillLabel>
                         </div>
-                    </>
-                )}
-            </>
+                        <div className="text-gray-400 dark:text-gray-300">
+                            <span>
+                                {isNeverExpired(tokenInfo.data.expirationTime!.toDate())
+                                    ? "Never expires!"
+                                    : `Expires on ${dayjs(tokenInfo.data.expirationTime!.toDate()).format(
+                                          "MMM D, YYYY",
+                                      )}`}
+                            </span>
+                            <span> · </span>
+                            <span>Created on {dayjs(tokenInfo.data.createdAt!.toDate()).format("MMM D, YYYY")}</span>
+                        </div>
+                    </div>
+                    <div className="pt-2">
+                        <div className="font-semibold text-gray-600 dark:text-gray-200">Your New Access Token</div>
+                        <InputWithCopy className="my-2 max-w-md" value={tokenInfo.data.value} tip="Copy Token" />
+                        <div className="mb-2 font-medium text-sm text-gray-500 dark:text-gray-300">
+                            Make sure to copy your access token — you won't be able to access it again.
+                        </div>
+                        <Button variant="secondary" onClick={handleCopyToken}>
+                            Copy Token to Clipboard
+                        </Button>
+                    </div>
+                </div>
+            )}
             {loading ? (
                 <SpinnerLoader content="loading access token list" />
             ) : (
@@ -248,9 +232,7 @@ function ListAccessTokensView() {
                             <Subheading className="text-center pb-6 w-96">
                                 Generate an access token for applications that need access to the Gitpod API.{" "}
                             </Subheading>
-                            <Link to={settingsPathPersonalAccessTokenCreate}>
-                                <button>New Access Token</button>
-                            </Link>
+                            <LinkButton href={settingsPathPersonalAccessTokenCreate}>New Access Token</LinkButton>
                         </div>
                     ) : (
                         <>

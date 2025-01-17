@@ -12,6 +12,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,11 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/gitpod-io/gitpod/common-go/util"
-	"github.com/gitpod-io/gitpod/ws-manager-mk2/pkg/activity"
 	"github.com/gitpod-io/gitpod/ws-manager/api/config"
 	workspacev1 "github.com/gitpod-io/gitpod/ws-manager/api/crd/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -50,10 +49,10 @@ func TestAPIs(t *testing.T) {
 }
 
 var (
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wsActivity *activity.WorkspaceActivity
-	wsMetrics  *controllerMetrics
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wsMetrics          *controllerMetrics
+	RegisterSubscriber func(func(*workspacev1.Workspace))
 )
 
 var _ = BeforeSuite(func() {
@@ -104,6 +103,8 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).ToNot(HaveOccurred())
 
+	SetupIndexer(k8sManager)
+
 	conf := newTestConfig()
 	maintenance := &fakeMaintenance{enabled: false}
 	wsReconciler, err := NewWorkspaceReconciler(k8sManager.GetClient(), k8sManager.GetScheme(), k8sManager.GetEventRecorderFor("workspace"), &conf, metrics.Registry, maintenance)
@@ -111,17 +112,25 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 	Expect(wsReconciler.SetupWithManager(k8sManager)).To(Succeed())
 
-	wsActivity = &activity.WorkspaceActivity{}
-	timeoutReconciler, err := NewTimeoutReconciler(k8sManager.GetClient(), k8sManager.GetEventRecorderFor("workspace"), conf, wsActivity, maintenance)
+	timeoutReconciler, err := NewTimeoutReconciler(k8sManager.GetClient(), k8sManager.GetEventRecorderFor("workspace"), conf, maintenance)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(timeoutReconciler.SetupWithManager(k8sManager)).To(Succeed())
 
 	ctx, cancel = context.WithCancel(context.Background())
+	subscriberReconciler, err := NewSubscriberReconciler(k8sManager.GetClient(), &conf)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(subscriberReconciler.SetupWithManager(ctx, k8sManager)).To(Succeed())
+	RegisterSubscriber = func(onReconcile func(*workspacev1.Workspace)) {
+		subscriberReconciler.OnReconcile = func(ctx context.Context, ws *workspacev1.Workspace) {
+			onReconcile(ws)
+		}
+	}
+
 	_ = createNamespace(secretsNamespace)
 
 	go func() {
 		defer GinkgoRecover()
-		err = k8sManager.Start(ctx)
+		err := k8sManager.Start(ctx)
 		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
 	}()
 
@@ -150,7 +159,9 @@ func newTestConfig() config.Configuration {
 				Name: "default",
 			},
 		},
-		WorkspaceURLTemplate: "{{ .ID }}-{{ .Prefix }}-{{ .Host }}",
+		WorkspaceURLTemplate:    "{{ .ID }}-{{ .Prefix }}-{{ .Host }}",
+		PodRecreationMaxRetries: 3,
+		PodRecreationBackoff:    util.Duration(500 * time.Millisecond),
 	}
 }
 
@@ -158,7 +169,7 @@ type fakeMaintenance struct {
 	enabled bool
 }
 
-func (f *fakeMaintenance) IsEnabled() bool {
+func (f *fakeMaintenance) IsEnabled(context.Context) bool {
 	return f.enabled
 }
 

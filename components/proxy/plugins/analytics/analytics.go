@@ -51,7 +51,7 @@ func (Analytics) CaddyModule() caddy.ModuleInfo {
 func (a *Analytics) Provision(ctx caddy.Context) error {
 	logger := ctx.Logger(a)
 
-	segmentEndponit, err := url.Parse(segment.DefaultEndpoint)
+	segmentEndpoint, err := resolveSegmenEndpoint()
 	if err != nil {
 		logger.Error("failed to parse segment endpoint", zap.Error(err))
 		return nil
@@ -63,16 +63,37 @@ func (a *Analytics) Provision(ctx caddy.Context) error {
 		return nil
 	}
 
-	a.segmentProxy = newSegmentProxy(segmentEndponit, errorLog)
+	a.segmentProxy = newSegmentProxy(segmentEndpoint, errorLog)
 	a.untrustedSegmentKey = os.Getenv("ANALYTICS_PLUGIN_UNTRUSTED_SEGMENT_KEY")
 	a.trustedSegmentKey = os.Getenv("ANALYTICS_PLUGIN_TRUSTED_SEGMENT_KEY")
 
 	return nil
 }
 
+func resolveSegmenEndpoint() (*url.URL, error) {
+	segmentEndpoint := os.Getenv("ANALYTICS_PLUGIN_SEGMENT_ENDPOINT")
+	if segmentEndpoint == "" {
+		segmentEndpoint = segment.DefaultEndpoint
+	}
+	return url.Parse(segmentEndpoint)
+}
+
 func newSegmentProxy(segmentEndpoint *url.URL, errorLog *log.Logger) http.Handler {
 	reverseProxy := httputil.NewSingleHostReverseProxy(segmentEndpoint)
 	reverseProxy.ErrorLog = errorLog
+	reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// the default error handler is:
+		// func (p *ReverseProxy) defaultErrorHandler(rw http.ResponseWriter, req *http.Request, err error) {
+		// 	p.logf("http: proxy error: %v", err)
+		// 	rw.WriteHeader(http.StatusBadGateway)
+		// }
+		//
+		// proxy returns 502 to clients when supervisor is having trouble, which is a signal the user experience is degraded
+		//
+		// this change makes it so that we return 503 when there is trouble with the /analytics endpoint
+		reverseProxy.ErrorLog.Printf("http: proxy error: %v", err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
 
 	// configure transport to ensure that requests
 	// can be processed without staling connections

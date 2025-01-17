@@ -11,12 +11,10 @@ inputs:
         description: "Whether to use a larger VM for the env"
         required: true
         default: false
-    sa_key:
-        description: "The service account key to use when authenticating with GCP"
+    preemptible:
+        description: "Whether to use preemptible VMs for the env"
         required: true
-    previewctl_hash:
-        description: "The Leeway hash of the dev/preview/previewctl:docker package to be used when downloading previewclt"
-        required: false
+        default: true
     recreate_vm:
         description: "Whether to recreate the VM"
         required: false

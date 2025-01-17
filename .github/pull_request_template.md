@@ -22,39 +22,48 @@ Does this PR require updates to the documentation at www.gitpod.io/docs?
 
 gitpod:summary
 
-## Build Options:
+## Build Options
+
+<details>
+<summary>Build</summary>
 
 - [ ] /werft with-werft
       Run the build with werft instead of GHA
 - [ ] leeway-no-cache
 - [ ] /werft no-test
       Run Leeway with `--dont-test`
+</details>
 
 <details>
-<summary>Publish Options</summary>
+<summary>Publish</summary>
 
 - [ ] /werft publish-to-npm
 - [ ] /werft publish-to-jb-marketplace
 </details>
 
 <details>
-<summary>Installer Options</summary>
+<summary>Installer</summary>
 
 - [ ] analytics=segment
 - [ ] with-dedicated-emulation
-- [x] with-ws-manager-mk2
 - [ ] workspace-feature-flags
   Add desired feature flags to the end of the line above, space separated
 </details>
 
-#### Preview Environment Options:
+<details>
+<summary>Preview Environment / Integration Tests</summary>
+
 - [ ] /werft with-local-preview
       If enabled this will build `install/preview`
 - [ ] /werft with-preview
 - [ ] /werft with-large-vm
-- [ ] /werft with-gce-vm
+- [x] /werft with-gce-vm
       If enabled this will create the environment on GCE infra
+- [x] /werft preemptible
+      Saves cost. Untick this only if you're really sure you need a non-preemtible machine.
 - [ ] with-integration-tests=all
-      Valid options are `all`, `workspace`, `webapp`, `ide`, `jetbrains`, `vscode`, `ssh`
+      Valid options are `all`, `workspace`, `webapp`, `ide`, `jetbrains`, `vscode`, `ssh`. If enabled, `with-preview` and `with-large-vm` will be enabled.
+- [ ] with-monitoring
+</details>
 
 /hold

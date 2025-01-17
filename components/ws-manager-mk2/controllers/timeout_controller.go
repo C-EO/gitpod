@@ -18,16 +18,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	wsk8s "github.com/gitpod-io/gitpod/common-go/kubernetes"
+	k8s "github.com/gitpod-io/gitpod/common-go/kubernetes"
 	"github.com/gitpod-io/gitpod/common-go/util"
-	wsactivity "github.com/gitpod-io/gitpod/ws-manager-mk2/pkg/activity"
+	"github.com/gitpod-io/gitpod/ws-manager-mk2/pkg/activity"
+	"github.com/gitpod-io/gitpod/ws-manager-mk2/pkg/constants"
 	"github.com/gitpod-io/gitpod/ws-manager-mk2/pkg/maintenance"
 	config "github.com/gitpod-io/gitpod/ws-manager/api/config"
 	workspacev1 "github.com/gitpod-io/gitpod/ws-manager/api/crd/v1"
+	"github.com/go-logr/logr"
 )
 
-func NewTimeoutReconciler(c client.Client, recorder record.EventRecorder, cfg config.Configuration, activity *wsactivity.WorkspaceActivity, maintenance maintenance.Maintenance) (*TimeoutReconciler, error) {
+func NewTimeoutReconciler(c client.Client, recorder record.EventRecorder, cfg config.Configuration, maintenance maintenance.Maintenance) (*TimeoutReconciler, error) {
 	if cfg.HeartbeatInterval == 0 {
 		return nil, fmt.Errorf("invalid heartbeat interval, must not be 0")
 	}
@@ -39,9 +42,7 @@ func NewTimeoutReconciler(c client.Client, recorder record.EventRecorder, cfg co
 	return &TimeoutReconciler{
 		Client:            c,
 		Config:            cfg,
-		activity:          activity,
 		reconcileInterval: reconcileInterval,
-		ctrlStartTime:     time.Now().UTC(),
 		recorder:          recorder,
 		maintenance:       maintenance,
 	}, nil
@@ -55,9 +56,7 @@ type TimeoutReconciler struct {
 	client.Client
 
 	Config            config.Configuration
-	activity          *wsactivity.WorkspaceActivity
 	reconcileInterval time.Duration
-	ctrlStartTime     time.Time
 	recorder          record.EventRecorder
 	maintenance       maintenance.Maintenance
 }
@@ -82,14 +81,16 @@ func (r *TimeoutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// backoff.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	log = log.WithValues("owi", workspace.OWI())
+	ctx = logr.NewContext(ctx, log)
 
-	if wsk8s.ConditionPresentAndTrue(workspace.Status.Conditions, string(workspacev1.WorkspaceConditionTimeout)) {
+	if workspace.IsConditionTrue(workspacev1.WorkspaceConditionTimeout) {
 		// Workspace has already been marked as timed out.
 		// Return and don't requeue another reconciliation.
 		return ctrl.Result{}, nil
 	}
 
-	if r.maintenance.IsEnabled() {
+	if r.maintenance.IsEnabled(ctx) {
 		// Don't reconcile timeouts in maintenance mode, to prevent workspace deletion.
 		// Requeue after some time to ensure we do still reconcile this workspace when
 		// maintenance mode ends.
@@ -109,7 +110,7 @@ func (r *TimeoutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 
 	// Workspace timed out, set Timeout condition.
-	log.Info("Workspace timed out", "reason", timedout)
+	log.V(2).Info("Workspace timed out", "reason", timedout)
 	if err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		err := r.Get(ctx, types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}, &workspace)
 		if err != nil {
@@ -160,8 +161,8 @@ func (r *TimeoutReconciler) isWorkspaceTimedOut(ws *workspacev1.Workspace) (reas
 	}
 
 	start := ws.ObjectMeta.CreationTimestamp.Time
-	lastActivity := r.activity.GetLastActivity(ws.Name)
-	isClosed := wsk8s.ConditionPresentAndTrue(ws.Status.Conditions, string(workspacev1.WorkspaceConditionClosed))
+	lastActivity := activity.Last(ws)
+	isClosed := ws.IsConditionTrue(workspacev1.WorkspaceConditionClosed)
 
 	switch phase {
 	case workspacev1.WorkspacePhasePending:
@@ -180,7 +181,8 @@ func (r *TimeoutReconciler) isWorkspaceTimedOut(ws *workspacev1.Workspace) (reas
 
 	case workspacev1.WorkspacePhaseRunning:
 		// First check is always for the max lifetime
-		if msg := decide(start, timeouts.MaxLifetime, activityMaxLifetime); msg != "" {
+		maxLifetime := r.getMaxLifetime(ws)
+		if msg := decide(start, maxLifetime, activityMaxLifetime); msg != "" {
 			return msg
 		}
 
@@ -194,23 +196,8 @@ func (r *TimeoutReconciler) isWorkspaceTimedOut(ws *workspacev1.Workspace) (reas
 			lastActivity = &start
 			activity = activityRunningHeadless
 		} else if lastActivity == nil {
-			// The workspace is up and running, but the user has never produced any activity, OR the controller
-			// has restarted and not yet received a heartbeat for this workspace (since heartbeats are stored
-			// in-memory and reset on restart).
-			// First check whether the controller has restarted during this workspace's lifetime.
-			// If it has, use the FirstUserActivity condition to determine whether there had already been any user activity
-			// before the controller restart.
-			// If the controller started before the workspace, then the user hasn't produced any activity yet.
-			if r.ctrlStartTime.After(start) && wsk8s.ConditionPresentAndTrue(ws.Status.Conditions, string(workspacev1.WorkspaceConditionFirstUserActivity)) {
-				// The controller restarted during this workspace's lifetime, and the workspace has had activity before the restart,
-				// so the last activity has been lost on restart. Therefore, "reset" the timeout and measure only since the controller startup time.
-				start = r.ctrlStartTime
-			} else {
-				// This workspace hasn't had any user activity yet (also not before a potential controller restart).
-				// So check for a startup timeout, and measure since workspace creation time.
-				timeout = timeouts.TotalStartup
-			}
-			return decide(start, timeout, activityNone)
+			// The workspace is up and running, but the user has never produced any activity
+			return decide(start, timeouts.TotalStartup, activityNone)
 		} else if isClosed {
 			reason := func() string {
 				afterClosed := timeouts.AfterClose
@@ -229,7 +216,7 @@ func (r *TimeoutReconciler) isWorkspaceTimedOut(ws *workspacev1.Workspace) (reas
 		return decide(*lastActivity, timeout, activity)
 
 	case workspacev1.WorkspacePhaseStopping:
-		if isWorkspaceBeingDeleted(ws) && !wsk8s.ConditionPresentAndTrue(ws.Status.Conditions, string(workspacev1.WorkspaceConditionBackupComplete)) {
+		if isWorkspaceBeingDeleted(ws) && !ws.IsConditionTrue(workspacev1.WorkspaceConditionBackupComplete) {
 			// Beware: we apply the ContentFinalization timeout only to workspaces which are currently being deleted.
 			//         We basically don't expect a workspace to be in content finalization before it's been deleted.
 			return decide(ws.DeletionTimestamp.Time, timeouts.ContentFinalization, activityBackup)
@@ -244,6 +231,14 @@ func (r *TimeoutReconciler) isWorkspaceTimedOut(ws *workspacev1.Workspace) (reas
 		// The only other phases we can be in is stopped which is pointless to time out
 		return ""
 	}
+}
+
+func (r *TimeoutReconciler) getMaxLifetime(ws *workspacev1.Workspace) util.Duration {
+	if ws.Spec.Timeout.MaximumLifetime != nil {
+		return util.Duration(ws.Spec.Timeout.MaximumLifetime.Duration)
+	}
+
+	return r.Config.Timeouts.MaxLifetime
 }
 
 func formatDuration(d time.Duration) string {
@@ -265,5 +260,19 @@ func (r *TimeoutReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("timeout").
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		For(&workspacev1.Workspace{}).
+		WithEventFilter(predicate.NewPredicateFuncs(func(object client.Object) bool {
+			for k, v := range object.GetLabels() {
+				if k == k8s.WorkspaceManagedByLabel {
+					switch v {
+					case constants.ManagedBy:
+						return true
+					default:
+						return false
+					}
+				}
+			}
+
+			return true
+		})).
 		Complete(r)
 }

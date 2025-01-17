@@ -8,18 +8,20 @@ import classNames from "classnames";
 import { FC } from "react";
 
 type HeadingProps = {
+    id?: string;
     tracking?: "tight" | "wide";
     color?: "light" | "dark";
     className?: string;
 };
 
-export const Heading1: FC<HeadingProps> = ({ color, tracking, className, children }) => {
+export const Heading1: FC<HeadingProps> = ({ id, color, tracking, className, children }) => {
     return (
         <h1
+            id={id}
             className={classNames(
                 getHeadingColor(color),
                 getTracking(tracking),
-                "font-bold text-4xl leading-64",
+                "font-bold text-4xl leading-normal",
                 className,
             )}
         >
@@ -28,33 +30,32 @@ export const Heading1: FC<HeadingProps> = ({ color, tracking, className, childre
     );
 };
 
-export const Heading2: FC<HeadingProps> = ({ color, tracking, className, children }) => {
+export const Heading2: FC<HeadingProps> = ({ id, color, tracking, className, children }) => {
     return (
         <h2
-            className={classNames(
-                getHeadingColor(color),
-                getTracking(tracking),
-                "leading-9 font-semibold text-2xl",
-                className,
-            )}
+            id={id}
+            className={classNames(getHeadingColor(color), getTracking(tracking), "font-semibold text-2xl", className)}
         >
             {children}
         </h2>
     );
 };
 
-export const Heading3: FC<HeadingProps> = ({ color, tracking, className, children }) => {
+export const Heading3: FC<HeadingProps> = ({ id, color, tracking, className, children }) => {
     return (
-        <h3 className={classNames(getHeadingColor(color), getTracking(tracking), "font-semibold text-lg", className)}>
+        <h3
+            id={id}
+            className={classNames(getHeadingColor(color), getTracking(tracking), "font-semibold text-lg", className)}
+        >
             {children}
         </h3>
     );
 };
 
 // Intended to be placed beneath a heading to provide more context
-export const Subheading: FC<HeadingProps> = ({ tracking, className, children }) => {
+export const Subheading: FC<HeadingProps> = ({ id, tracking, className, children }) => {
     return (
-        <p className={classNames("text-base text-gray-500 dark:text-gray-600", getTracking(tracking), className)}>
+        <p id={id} className={classNames("text-base text-pk-content-secondary", getTracking(tracking), className)}>
             {children}
         </p>
     );

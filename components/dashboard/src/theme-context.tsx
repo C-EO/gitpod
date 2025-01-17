@@ -4,7 +4,7 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import React, { createContext, useCallback, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 export const ThemeContext = createContext<{
     isDark?: boolean;
@@ -62,5 +62,23 @@ export const ThemeContextProvider: React.FC = ({ children }) => {
         };
     }, [actuallySetIsDark]);
 
-    return <ThemeContext.Provider value={{ isDark, setIsDark: actuallySetIsDark }}>{children}</ThemeContext.Provider>;
+    const ctx = useMemo(() => ({ isDark, setIsDark: actuallySetIsDark }), [actuallySetIsDark, isDark]);
+
+    return <ThemeContext.Provider value={ctx}>{children}</ThemeContext.Provider>;
+};
+
+export const useTheme = () => {
+    return useContext(ThemeContext);
+};
+
+/**
+ * Helper for making components themable and invertable, i.e. supports being used on an inverted backround.
+ *
+ * @param lightClass css class for light theme
+ * @param darkClass corresponding css class for dark theme
+ * @param inverted if the classes should be inverted, i.e. the component is on an inverted background
+ * @returns Array containing the two class strings w/ the proper one prefixed with `dark:`
+ */
+export const invertable = (lightClass: string, darkClass: string, inverted = false) => {
+    return [!inverted ? lightClass : darkClass, !inverted ? `dark:${darkClass}` : `dark:${lightClass}`];
 };

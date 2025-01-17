@@ -5,21 +5,21 @@
  */
 
 import { FC, useCallback, useReducer, useState } from "react";
-import { Button } from "../components/Button";
 import { Heading1, Subheading } from "../components/typography/headings";
 import { SetupLayout } from "./SetupLayout";
-import check from "../images/check.svg";
-import Tooltip from "../components/Tooltip";
 import { SSOConfigForm, isValid, ssoConfigReducer, useSaveSSOConfig } from "../teams/sso/SSOConfigForm";
 import Alert from "../components/Alert";
 import { OIDCClientConfig } from "@gitpod/public-api/lib/gitpod/experimental/v1/oidc_pb";
 import { openOIDCStartWindow } from "../provider-utils";
+import { LoadingButton } from "@podkit/buttons/LoadingButton";
 
 type Props = {
     config?: OIDCClientConfig;
     onComplete: () => void;
+    progressCurrent?: number;
+    progressTotal?: number;
 };
-export const SSOSetupStep: FC<Props> = ({ config, onComplete }) => {
+export const SSOSetupStep: FC<Props> = ({ config, onComplete, progressCurrent, progressTotal }) => {
     const [ssoLoginError, setSSOLoginError] = useState("");
 
     const [ssoConfig, dispatch] = useReducer(ssoConfigReducer, {
@@ -27,6 +27,8 @@ export const SSOSetupStep: FC<Props> = ({ config, onComplete }) => {
         issuer: config?.oidcConfig?.issuer ?? "",
         clientId: config?.oauth2Config?.clientId ?? "",
         clientSecret: config?.oauth2Config?.clientSecret ?? "",
+        celExpression: config?.oauth2Config?.celExpression ?? "",
+        usePKCE: config?.oauth2Config?.usePkce ?? false,
     });
     const configIsValid = isValid(ssoConfig);
 
@@ -80,22 +82,17 @@ export const SSOSetupStep: FC<Props> = ({ config, onComplete }) => {
     );
 
     return (
-        <SetupLayout showOrg>
-            <div className="flex flex-row space-x-2 mb-4">
-                <Tooltip content="Naming your Organization">
-                    <div className="w-5 h-5 bg-green-600 rounded-full flex justify-center items-center text-color-white">
-                        <img src={check} width={15} height={15} alt="checkmark" />
-                    </div>
-                </Tooltip>
-                <div className="w-5 h-5 bg-gray-400 rounded-full" />
-            </div>
-
+        <SetupLayout showOrg progressCurrent={progressCurrent} progressTotal={progressTotal}>
             <div className="mb-10">
                 <Heading1>Configure single sign-on</Heading1>
                 <Subheading>
-                    {/* TODO: Find what link we want to use here */}
                     Enable single sign-on for your organization using the OpenID Connect (OIDC) standard.{" "}
-                    <a href="https://openid.net/connect/" target="_blank" rel="noreferrer noopener" className="gp-link">
+                    <a
+                        href="https://www.gitpod.io/docs/enterprise/setup-gitpod/configure-sso"
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="gp-link"
+                    >
                         Learn more
                     </a>
                 </Subheading>
@@ -108,9 +105,9 @@ export const SSOSetupStep: FC<Props> = ({ config, onComplete }) => {
                 <SSOConfigForm config={ssoConfig} onChange={dispatch} />
 
                 <div className="mt-6">
-                    <Button size="block" disabled={!configIsValid} loading={isLoading}>
+                    <LoadingButton type="submit" className="w-full" disabled={!configIsValid} loading={isLoading}>
                         Verify SSO Configuration
-                    </Button>
+                    </LoadingButton>
                 </div>
             </form>
         </SetupLayout>

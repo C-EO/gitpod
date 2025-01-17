@@ -4,7 +4,7 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import React, { FC, Suspense, useEffect } from "react";
+import { FC, Suspense, useEffect } from "react";
 import { AppLoading } from "./app/AppLoading";
 import { AppRoutes } from "./app/AppRoutes";
 import { useCurrentOrg } from "./data/organizations/orgs-query";
@@ -12,13 +12,12 @@ import { useAnalyticsTracking } from "./hooks/use-analytics-tracking";
 import { useUserLoader } from "./hooks/use-user-loader";
 import { Login } from "./Login";
 import { AppBlockingFlows } from "./app/AppBlockingFlows";
-import { useHistory } from "react-router";
-
-// Wrap the App in an ErrorBoundary to catch User/Org loading errors
-// This will also catch any errors that happen to bubble all the way up to the top
-const AppWithErrorBoundary: FC = () => {
-    return <App />;
-};
+import { Route, Switch, useHistory, useLocation } from "react-router";
+import { ErrorPages } from "./error-pages/ErrorPages";
+import { LinkedInCallback } from "react-linkedin-login-oauth2";
+import { useQueryParams } from "./hooks/use-query-params";
+import { useTheme } from "./theme-context";
+import QuickStart from "./components/QuickStart";
 
 export const StartWorkspaceModalKeyBinding = `${/(Mac|iPhone|iPod|iPad)/i.test(navigator.platform) ? "⌘" : "Ctrl﹢"}O`;
 
@@ -27,22 +26,39 @@ const App: FC = () => {
     const { user, loading } = useUserLoader();
     const currentOrgQuery = useCurrentOrg();
     const history = useHistory();
+    const location = useLocation();
+    const search = useQueryParams();
+    const { isDark, setIsDark } = useTheme();
 
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "o") {
                 event.preventDefault();
                 history.push("/new");
+                return;
+            } else if (event.metaKey && event.ctrlKey && event.shiftKey && event.key === "M") {
+                setIsDark(!isDark);
+                return;
             }
         };
         window.addEventListener("keydown", onKeyDown);
         return () => {
             window.removeEventListener("keydown", onKeyDown);
         };
-    }, [history]);
+    }, [history, isDark, setIsDark]);
 
     // Setup analytics/tracking
     useAnalyticsTracking();
+
+    if (location.pathname === "/linkedin" && search.get("code") && search.get("state")) {
+        return <LinkedInCallback />;
+    }
+
+    // Page can be loaded even if user is not authenticated
+    // RegEx is used for accounting for trailing slash /
+    if (window.location.pathname.replace(/\/$/, "") === "/quickstart") {
+        return <QuickStart />;
+    }
 
     if (loading) {
         return <AppLoading />;
@@ -72,4 +88,13 @@ const App: FC = () => {
     );
 };
 
-export default AppWithErrorBoundary;
+// Routing level above main App component for any routes that don't need user/orgs loaded, such as addressable error pages
+export const RootAppRouter: FC = () => {
+    return (
+        <Switch>
+            {/* Any route that starts w/ `/error` will render a specific error page if it matches a route, otherwise a generic error page */}
+            <Route path="/error" component={ErrorPages} />
+            <Route path="*" component={App} />
+        </Switch>
+    );
+};

@@ -9,31 +9,35 @@ import dayjs from "dayjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router";
 import { Link } from "react-router-dom";
-import Modal from "../components/Modal";
+import Modal, { ModalBody, ModalFooter, ModalHeader } from "../components/Modal";
 import { useCurrentOrg } from "../data/organizations/orgs-query";
 import { ReactComponent as Spinner } from "../icons/Spinner.svg";
 import { ReactComponent as Check } from "../images/check-circle.svg";
 import { getGitpodService } from "../service/service";
 import Alert from "./Alert";
-import { Heading2, Subheading } from "./typography/headings";
+import { Subheading } from "./typography/headings";
 import { AddPaymentMethodModal } from "./billing/AddPaymentMethodModal";
-import { Button } from "./Button";
 import { useCreateHoldPaymentIntentMutation } from "../data/billing/create-hold-payment-intent-mutation";
 import { useToast } from "./toasts/Toasts";
+import { ProgressBar } from "./ProgressBar";
+import { useListOrganizationMembers } from "../data/organizations/members-query";
+import { Button } from "@podkit/buttons/Button";
+import { LoadingButton } from "@podkit/buttons/LoadingButton";
 
 const BASE_USAGE_LIMIT_FOR_STRIPE_USERS = 1000;
 
 interface Props {
-    attributionId?: string;
     hideSubheading?: boolean;
 }
 
 // Guard against multiple calls to subscripe (per page load)
 let didAlreadyCallSubscribe = false;
 
-export default function UsageBasedBillingConfig({ attributionId, hideSubheading = false }: Props) {
+export default function UsageBasedBillingConfig({ hideSubheading = false }: Props) {
     const currentOrg = useCurrentOrg().data;
-    const attrId = attributionId ? AttributionId.parse(attributionId) : undefined;
+    const attrId = currentOrg ? AttributionId.createFromOrganizationId(currentOrg.id) : undefined;
+    const attributionId = attrId && AttributionId.render(attrId);
+    const members = useListOrganizationMembers().data;
     const [showUpdateLimitModal, setShowUpdateLimitModal] = useState<boolean>(false);
     const [stripeSubscriptionId, setStripeSubscriptionId] = useState<string | undefined>();
     const [isLoadingStripeSubscription, setIsLoadingStripeSubscription] = useState<boolean>(true);
@@ -154,7 +158,7 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
                 // FIXME: Should we ask the customer to confirm or edit this default limit?
                 let limit = BASE_USAGE_LIMIT_FOR_STRIPE_USERS;
                 if (attrId?.kind === "team" && currentOrg) {
-                    limit = BASE_USAGE_LIMIT_FOR_STRIPE_USERS * currentOrg.members.length;
+                    limit = BASE_USAGE_LIMIT_FOR_STRIPE_USERS * (members?.length || 0);
                 }
                 const newLimit = await getGitpodService().server.subscribeToStripe(
                     attributionId,
@@ -189,15 +193,13 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
                 );
             }
         },
-        [attrId?.kind, attributionId, currentOrg, location.pathname, refreshSubscriptionDetails],
+        [members, attrId?.kind, attributionId, currentOrg, location.pathname, refreshSubscriptionDetails],
     );
 
     const showSpinner = !attributionId || isLoadingStripeSubscription || isCreatingSubscription;
     const showBalance = !showSpinner;
     const showUpgradeTeam =
         !showSpinner && AttributionId.parse(attributionId)?.kind === "team" && !stripeSubscriptionId;
-    const showUpgradeUser =
-        !showSpinner && AttributionId.parse(attributionId)?.kind === "user" && !stripeSubscriptionId;
     const showManageBilling = !showSpinner && !!stripeSubscriptionId;
 
     const updateUsageLimit = useCallback(
@@ -205,16 +207,18 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
             if (!attributionId) {
                 return;
             }
-            setShowUpdateLimitModal(false);
+
             try {
                 await getGitpodService().server.setUsageLimit(attributionId, newLimit);
                 setUsageLimit(newLimit);
+                toast(`Your usage limit was updated to ${newLimit || 0}`);
             } catch (error) {
                 console.error("Failed to update usage limit", error);
                 setErrorMessage(`Failed to update usage limit. ${error?.message || String(error)}`);
             }
+            setShowUpdateLimitModal(false);
         },
-        [attributionId],
+        [attributionId, toast],
     );
 
     const balance = currentUsage * -1 + usageLimit;
@@ -228,13 +232,7 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
 
     return (
         <div className="mb-16">
-            {!hideSubheading && (
-                <Subheading>
-                    {attributionId && AttributionId.parse(attributionId)?.kind === "user"
-                        ? "Manage billing for your personal account."
-                        : "Manage billing for your organization."}
-                </Subheading>
-            )}
+            {!hideSubheading && <Subheading>Manage billing for your organization.</Subheading>}
             <div className="max-w-xl flex flex-col">
                 {errorMessage && (
                     <Alert className="max-w-xl mt-2" closable={false} showIcon={true} type="error">
@@ -273,7 +271,7 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
                             )}
                         </div>
                         <div className="mt-2 flex">
-                            <progress className="h-2 flex-grow rounded-xl" value={percentage} max={100} />
+                            <ProgressBar value={percentage} />
                         </div>
                         <div className="bg-gray-100 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 -m-4 p-4 mt-4 rounded-b-xl flex">
                             <div className="flex-grow">
@@ -292,15 +290,17 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
                                 <Link
                                     to={`/usage?org=${
                                         attrId?.kind === "team" ? attrId.teamId : "0"
-                                    }#${billingCycleFrom.format("YYYY-MM-DD")}:${billingCycleTo.format("YYYY-MM-DD")}`}
+                                    }&start=${billingCycleFrom.format("YYYY-MM-DD")}&end=${billingCycleTo.format(
+                                        "YYYY-MM-DD",
+                                    )}`}
                                 >
-                                    <button className="secondary">View Usage →</button>
+                                    <Button variant="secondary">View Usage →</Button>
                                 </Link>
                             </div>
                         </div>
                     </div>
                 )}
-                {(showUpgradeTeam || showUpgradeUser) && (
+                {showUpgradeTeam && (
                     <>
                         <div className="flex flex-col mt-4 p-4 rounded-t-xl bg-gray-50 dark:bg-gray-800">
                             <div className="uppercase text-sm text-gray-400 dark:text-gray-500">Current Plan</div>
@@ -326,25 +326,20 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
                             </div>
                             <div className="mt-4 flex space-x-1 text-gray-400 dark:text-gray-500">
                                 <div className="flex flex-col">
-                                    <span>
-                                        {priceInformation}{" "}
-                                        <a className="gp-link" href="https://www.gitpod.io/pricing#cost-estimator">
-                                            Estimate costs
-                                        </a>
-                                    </span>
+                                    <span>{priceInformation}</span>
                                 </div>
                             </div>
                             <div className="flex justify-end mt-6 space-x-2">
                                 {stripePortalUrl && (
                                     <a href={stripePortalUrl}>
-                                        <button className="secondary" disabled={!stripePortalUrl}>
+                                        <Button variant="secondary" disabled={!stripePortalUrl}>
                                             View Past Invoices ↗
-                                        </button>
+                                        </Button>
                                     </a>
                                 )}
-                                <Button loading={createPaymentIntent.isLoading} onClick={handleAddPaymentMethod}>
+                                <LoadingButton loading={createPaymentIntent.isLoading} onClick={handleAddPaymentMethod}>
                                     Upgrade Plan
-                                </Button>
+                                </LoadingButton>
                             </div>
                         </div>
                     </>
@@ -359,19 +354,14 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
                             <div className="mt-4 flex space-x-1 text-gray-400 dark:text-gray-500">
                                 <Check className="m-0.5 w-8 h-5 text-orange-500" />
                                 <div className="flex flex-col">
-                                    <span>
-                                        {priceInformation}{" "}
-                                        <a className="gp-link" href="https://www.gitpod.io/pricing#cost-estimator">
-                                            Estimate costs
-                                        </a>
-                                    </span>
+                                    <span>{priceInformation}</span>
                                 </div>
                             </div>
 
                             <a className="mt-5 self-end" href={stripePortalUrl}>
-                                <button className="secondary" disabled={!stripePortalUrl}>
-                                    Manage Plan ↗
-                                </button>
+                                <Button variant="secondary" disabled={!stripePortalUrl}>
+                                    Manage Billing Settings ↗
+                                </Button>
                             </a>
                         </div>
                     </div>
@@ -386,14 +376,10 @@ export default function UsageBasedBillingConfig({ attributionId, hideSubheading 
             )}
             {showUpdateLimitModal && (
                 <UpdateLimitModal
-                    minValue={
-                        AttributionId.parse(attributionId || "")?.kind === "user"
-                            ? BASE_USAGE_LIMIT_FOR_STRIPE_USERS
-                            : 0
-                    }
+                    minValue={0}
                     currentValue={usageLimit}
                     onClose={() => setShowUpdateLimitModal(false)}
-                    onUpdate={(newLimit) => updateUsageLimit(newLimit)}
+                    onUpdate={async (newLimit) => await updateUsageLimit(newLimit)}
                 />
             )}
         </div>
@@ -404,15 +390,15 @@ function UpdateLimitModal(props: {
     minValue?: number;
     currentValue: number | undefined;
     onClose: () => void;
-    onUpdate: (newLimit: number) => {};
+    onUpdate: (newLimit: number) => void;
 }) {
+    const [isSaving, setIsSaving] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string>("");
     const [newLimit, setNewLimit] = useState<string | undefined>(
         typeof props.currentValue === "number" ? String(props.currentValue) : undefined,
     );
 
-    function onSubmit(event: React.FormEvent) {
-        event.preventDefault();
+    const onSubmit = useCallback(async () => {
         if (!newLimit) {
             setErrorMessage("Please specify a limit");
             return;
@@ -426,41 +412,47 @@ function UpdateLimitModal(props: {
             setErrorMessage(`Please specify a limit that is >= ${props.minValue}`);
             return;
         }
-        props.onUpdate(n);
-    }
+
+        setIsSaving(true);
+        await props.onUpdate(n);
+        setIsSaving(false);
+    }, [newLimit, props]);
 
     return (
-        <Modal visible={true} onClose={props.onClose} onEnter={() => false}>
-            <Heading2 className="mb-4">Usage Limit</Heading2>
-            <form onSubmit={onSubmit}>
-                <div className="border-t border-b border-gray-200 dark:border-gray-700 -mx-6 px-6 py-4 flex flex-col">
-                    <p className="pb-4 text-gray-500 text-base">Set usage limit in total credits per month.</p>
-                    {errorMessage && (
-                        <Alert type="error" className="-mt-2 mb-2">
-                            {errorMessage}
-                        </Alert>
-                    )}
-                    <label className="font-medium">
-                        Credits
-                        <div className="w-full">
-                            <input
-                                type="text"
-                                value={newLimit}
-                                className={`rounded-md w-full truncate overflow-x-scroll pr-8 ${
-                                    errorMessage ? "error" : ""
-                                }`}
-                                onChange={(e) => {
-                                    setErrorMessage("");
-                                    setNewLimit(e.target.value);
-                                }}
-                            />
-                        </div>
-                    </label>
-                </div>
-                <div className="flex justify-end mt-6 space-x-2">
-                    <button className="secondary">Update</button>
-                </div>
-            </form>
+        <Modal visible={true} onClose={props.onClose} onSubmit={onSubmit}>
+            <ModalHeader>Usage Limit</ModalHeader>
+            <ModalBody>
+                <p className="pb-4 text-gray-500 text-base">Set usage limit in total credits per month.</p>
+                {errorMessage && (
+                    <Alert type="error" className="-mt-2 mb-2">
+                        {errorMessage}
+                    </Alert>
+                )}
+                <label className="font-medium">
+                    Credits
+                    <div className="w-full">
+                        <input
+                            type="text"
+                            value={newLimit}
+                            className={`rounded-md w-full truncate overflow-x-scroll pr-8 ${
+                                errorMessage ? "error" : ""
+                            }`}
+                            onChange={(e) => {
+                                setErrorMessage("");
+                                setNewLimit(e.target.value);
+                            }}
+                        />
+                    </div>
+                </label>
+            </ModalBody>
+            <ModalFooter>
+                <Button variant="secondary" onClick={props.onClose}>
+                    Cancel
+                </Button>
+                <LoadingButton type="submit" loading={isSaving}>
+                    Update
+                </LoadingButton>
+            </ModalFooter>
         </Modal>
     );
 }

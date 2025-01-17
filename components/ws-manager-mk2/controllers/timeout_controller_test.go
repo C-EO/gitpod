@@ -8,7 +8,6 @@ import (
 	"time"
 
 	wsk8s "github.com/gitpod-io/gitpod/common-go/kubernetes"
-	"github.com/gitpod-io/gitpod/ws-manager-mk2/pkg/activity"
 	workspacev1 "github.com/gitpod-io/gitpod/ws-manager/api/crd/v1"
 	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
@@ -35,8 +34,8 @@ var _ = Describe("TimeoutController", func() {
 			var err error
 			// Use a fake client instead of the envtest's k8s client, such that we can add objects
 			// with custom CreationTimestamps and check timeout logic.
-			fakeClient = fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).Build()
-			r, err = NewTimeoutReconciler(fakeClient, record.NewFakeRecorder(100), conf, &activity.WorkspaceActivity{}, &fakeMaintenance{enabled: false})
+			fakeClient = fake.NewClientBuilder().WithStatusSubresource(&workspacev1.Workspace{}).WithScheme(k8sClient.Scheme()).Build()
+			r, err = NewTimeoutReconciler(fakeClient, record.NewFakeRecorder(100), conf, &fakeMaintenance{enabled: false})
 			Expect(err).ToNot(HaveOccurred())
 		})
 
@@ -45,9 +44,9 @@ var _ = Describe("TimeoutController", func() {
 			lastActivityAgo   *time.Duration
 			age               time.Duration
 			customTimeout     *time.Duration
+			customMaxLifetime *time.Duration
 			update            func(ws *workspacev1.Workspace)
 			updateStatus      func(ws *workspacev1.Workspace)
-			controllerRestart time.Time
 			expectTimeout     bool
 		}
 		DescribeTable("workspace timeouts",
@@ -55,15 +54,20 @@ var _ = Describe("TimeoutController", func() {
 				By("creating a workspace")
 				ws := newWorkspace(uuid.NewString(), "default")
 				ws.CreationTimestamp = metav1.NewTime(now.Add(-tc.age))
-				Expect(fakeClient.Create(ctx, ws)).To(Succeed())
 
 				if tc.lastActivityAgo != nil {
-					r.activity.Store(ws.Name, now.Add(-*tc.lastActivityAgo))
+					now := metav1.NewTime(now.Add(-*tc.lastActivityAgo))
+					ws.Status.LastActivity = &now
 				}
+
+				Expect(fakeClient.Create(ctx, ws)).To(Succeed())
 
 				updateObjWithRetries(fakeClient, ws, false, func(ws *workspacev1.Workspace) {
 					if tc.customTimeout != nil {
 						ws.Spec.Timeout.Time = &metav1.Duration{Duration: *tc.customTimeout}
+					}
+					if tc.customMaxLifetime != nil {
+						ws.Spec.Timeout.MaximumLifetime = &metav1.Duration{Duration: *tc.customMaxLifetime}
 					}
 					if tc.update != nil {
 						tc.update(ws)
@@ -75,15 +79,6 @@ var _ = Describe("TimeoutController", func() {
 						tc.updateStatus(ws)
 					}
 				})
-
-				// Set controller (re)start time.
-				if tc.controllerRestart.IsZero() {
-					// Bit arbitrary, but default to the controller running for ~2 days.
-					r.ctrlStartTime = now.Add(-48 * time.Hour)
-
-				} else {
-					r.ctrlStartTime = tc.controllerRestart
-				}
 
 				// Run the timeout controller for this workspace.
 				By("running the TimeoutController reconcile()")
@@ -143,38 +138,24 @@ var _ = Describe("TimeoutController", func() {
 				lastActivityAgo: nil,
 				expectTimeout:   true,
 			}),
-			Entry("should timeout workspace over max lifetime", testCase{
+			Entry("should timeout workspace with no custom lifetime", testCase{
 				phase:           workspacev1.WorkspacePhaseRunning,
 				age:             50 * time.Hour,
 				lastActivityAgo: pointer.Duration(1 * time.Minute),
 				expectTimeout:   true,
 			}),
-			Entry("shouldn't timeout after controller restart", testCase{
-				phase: workspacev1.WorkspacePhaseRunning,
-				updateStatus: func(ws *workspacev1.Workspace) {
-					// Add FirstUserActivity condition from 5 hours ago.
-					// From this condition the controller should deduce that the workspace
-					// has had user activity, but since lastActivity is nil, it's been cleared on
-					// a restart. The controller therefore should not timeout the workspace and
-					// wait for new user activity. Or timeout once user activity doesn't come
-					// eventually after the controller restart.
-					ws.Status.Conditions = wsk8s.AddUniqueCondition(ws.Status.Conditions, metav1.Condition{
-						Type:               string(workspacev1.WorkspaceConditionFirstUserActivity),
-						Status:             metav1.ConditionTrue,
-						LastTransitionTime: metav1.NewTime(now.Add(-5 * time.Hour)),
-					})
-				},
-				age:               5 * time.Hour,
-				lastActivityAgo:   nil, // No last activity recorded yet after controller restart.
-				controllerRestart: now,
-				expectTimeout:     false,
+			Entry("should timeout workspace with custom lifetime", testCase{
+				phase:             workspacev1.WorkspacePhaseRunning,
+				age:               12 * time.Hour,
+				customMaxLifetime: pointer.Duration(8 * time.Hour),
+				lastActivityAgo:   pointer.Duration(1 * time.Minute),
+				expectTimeout:     true,
 			}),
 			Entry("should timeout after controller restart if no FirstUserActivity", testCase{
-				phase:             workspacev1.WorkspacePhaseRunning,
-				age:               5 * time.Hour,
-				lastActivityAgo:   nil, // No last activity recorded yet after controller restart.
-				controllerRestart: now,
-				expectTimeout:     true,
+				phase:           workspacev1.WorkspacePhaseRunning,
+				age:             5 * time.Hour,
+				lastActivityAgo: nil, // No last activity recorded yet after controller restart.
+				expectTimeout:   true,
 			}),
 			Entry("should timeout eventually with no user activity after controller restart", testCase{
 				phase: workspacev1.WorkspacePhaseRunning,
@@ -185,10 +166,9 @@ var _ = Describe("TimeoutController", func() {
 						LastTransitionTime: metav1.NewTime(now.Add(-5 * time.Hour)),
 					})
 				},
-				age:               5 * time.Hour,
-				lastActivityAgo:   nil,
-				controllerRestart: now.Add(-2 * time.Hour),
-				expectTimeout:     true,
+				age:             5 * time.Hour,
+				lastActivityAgo: nil,
+				expectTimeout:   true,
 			}),
 		)
 	})
@@ -197,7 +177,7 @@ var _ = Describe("TimeoutController", func() {
 		var r *TimeoutReconciler
 		BeforeEach(func() {
 			var err error
-			r, err = NewTimeoutReconciler(k8sClient, record.NewFakeRecorder(100), newTestConfig(), &activity.WorkspaceActivity{}, &fakeMaintenance{enabled: false})
+			r, err = NewTimeoutReconciler(k8sClient, record.NewFakeRecorder(100), newTestConfig(), &fakeMaintenance{enabled: false})
 			Expect(err).ToNot(HaveOccurred())
 		})
 

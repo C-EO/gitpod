@@ -5,11 +5,13 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	stdlog "log"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/registry-facade/api"
 	"github.com/gitpod-io/gitpod/registry-facade/api/config"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/remotes"
@@ -30,7 +33,7 @@ import (
 	distv2 "github.com/docker/distribution/registry/api/v2"
 	"github.com/golang/protobuf/jsonpb"
 	"github.com/gorilla/mux"
-	httpapi "github.com/ipfs/go-ipfs-http-client"
+	httpapi "github.com/ipfs/kubo/client/rpc"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
@@ -52,7 +55,7 @@ func buildStaticLayer(ctx context.Context, cfg []config.StaticLayerCfg, newResol
 			}
 			l = append(l, src)
 		case "image":
-			src, err := NewStaticSourceFromImage(ctx, newResolver(), sl.Ref)
+			src, err := NewStaticSourceFromImage(ctx, newResolver, sl.Ref)
 			if err != nil {
 				return nil, xerrors.Errorf("cannot source layer from %s: %w", sl.Ref, err)
 			}
@@ -297,9 +300,28 @@ func getRedisClient(cfg *config.RedisCacheConfig) (*redis.Client, error) {
 	defer cancel()
 
 	rdc := redis.NewClient(opts)
-	_, err := rdc.Ping(ctx).Result()
-	if err != nil {
-		return nil, xerrors.Errorf("cannot check Redis connection: %w", err)
+
+	var lastError error
+	waitErr := wait.ExponentialBackoffWithContext(ctx, wait.Backoff{
+		Steps:    5,
+		Duration: 50 * time.Millisecond,
+		Factor:   2.0,
+		Jitter:   0.2,
+	}, func(ctx context.Context) (bool, error) {
+		_, err := rdc.Ping(ctx).Result()
+		if err != nil {
+			lastError = err
+			return false, nil
+		}
+
+		return true, nil
+	})
+	if waitErr != nil {
+		if waitErr == wait.ErrWaitTimeout {
+			return nil, xerrors.Errorf("cannot check Redis connection: %w", lastError)
+		}
+
+		return nil, waitErr
 	}
 
 	return rdc, nil
@@ -333,7 +355,7 @@ func (reg *Registry) Serve() error {
 		// e.g. using curl or another Docker daemon. Using the env var we can enable an additional
 		// HTTP service.
 		//
-		// Note: this is is just meant for a telepresence setup
+		// Note: this is just meant for a telepresence setup
 		go func() {
 			err := http.ListenAndServe(addr, mux)
 			if err != nil {
@@ -349,8 +371,9 @@ func (reg *Registry) Serve() error {
 	}
 
 	reg.srv = &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:     addr,
+		Handler:  mux,
+		ErrorLog: stdlog.New(logrusErrorWriter{}, "", 0),
 	}
 
 	if reg.Config.TLS != nil {
@@ -533,4 +556,17 @@ func getDigest(ctx context.Context) string {
 	}
 
 	return sval
+}
+
+var tlsHandshakeErrorPrefix = []byte("http: TLS handshake error")
+
+type logrusErrorWriter struct{}
+
+func (w logrusErrorWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, tlsHandshakeErrorPrefix) {
+		return len(p), nil
+	}
+
+	log.Errorf("%s", string(p))
+	return len(p), nil
 }

@@ -31,10 +31,13 @@ func NewOIDCClientConfig(t *testing.T, record db.OIDCClientConfig) db.OIDCClient
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	result := db.OIDCClientConfig{
-		ID:           uuid.New(),
-		Issuer:       "issuer",
-		Data:         encrypted,
-		LastModified: now,
+		ID:             uuid.New(),
+		OrganizationID: uuid.New(),
+		Issuer:         "https://accounts.google.com",
+		Data:           encrypted,
+		LastModified:   now,
+		Active:         false,
+		Verified:       db.BoolPointer(false),
 	}
 
 	if record.ID != uuid.Nil {
@@ -53,6 +56,14 @@ func NewOIDCClientConfig(t *testing.T, record db.OIDCClientConfig) db.OIDCClient
 		result.Data = record.Data
 	}
 
+	if record.Active {
+		result.Active = true
+	}
+
+	if record.Verified != nil && *record.Verified {
+		result.Verified = db.BoolPointer(true)
+	}
+
 	return result
 }
 
@@ -66,8 +77,9 @@ func CreateOIDCClientConfigs(t *testing.T, conn *gorm.DB, entries ...db.OIDCClie
 		records = append(records, record)
 		ids = append(ids, record.ID.String())
 
-		_, err := db.CreateOIDCClientConfig(context.Background(), conn, record)
+		foo, err := db.CreateOIDCClientConfig(context.Background(), conn, record)
 		require.NoError(t, err)
+		require.NotNil(t, foo)
 	}
 
 	t.Cleanup(func() {

@@ -9,24 +9,9 @@ variable "kubeconfig_path" {
   description = "The path to the kubernetes config"
 }
 
-variable "preview_namespace" {
-  type = string
-}
-
 variable "vm_type" {
   type    = string
   default = "n2d-standard-16"
-}
-
-variable "ssh_key" {
-  type        = string
-  description = "ssh public key used for access to the vm"
-}
-
-variable "harvester_kube_context" {
-  type        = string
-  default     = "harvester"
-  description = "The name of the harvester kube context"
 }
 
 variable "dev_kube_context" {
@@ -35,16 +20,10 @@ variable "dev_kube_context" {
   description = "The name of the dev kube context"
 }
 
-variable "harvester_ingress_ip" {
-  type        = string
-  default     = "159.69.172.117"
-  description = "Ingress IP in Harvester cluster"
-}
-
 variable "vm_image" {
   type        = string
   description = "The VM image"
-  default     = "gitpod-k3s-202305091902"
+  default     = "gitpod-k3s-202411272101"
 }
 
 variable "cert_issuer" {

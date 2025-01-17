@@ -1,9 +1,3 @@
-variable "infra_provider" {
-  type        = string
-  default     = "harvester"
-  description = "the provider for the infra: [harvester, gce]"
-}
-
 variable "preview_name" {
   type        = string
   description = "The preview environment's name"
@@ -11,14 +5,8 @@ variable "preview_name" {
 
 variable "kubeconfig_path" {
   type        = string
-  default     = "/home/gitpod/.kube/config"
+  default     = "$HOME/.kube/config"
   description = "The path to the kubernetes config"
-}
-
-variable "harvester_kube_context" {
-  type        = string
-  default     = "harvester"
-  description = "The name of the harvester kube context"
 }
 
 variable "dev_kube_context" {
@@ -35,7 +23,7 @@ variable "vm_type" {
 variable "vm_image" {
   type        = string
   description = "The VM image"
-  default     = "gitpod-k3s-202305091902"
+  default     = "gitpod-k3s-202411272101"
 }
 
 variable "cert_issuer" {

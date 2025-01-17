@@ -6,21 +6,22 @@
 
 import { FC, FormEvent, useCallback } from "react";
 import Alert from "../components/Alert";
-import { Button, ButtonProps } from "../components/Button";
+import { Button, ButtonProps } from "@podkit/buttons/Button";
 import { Heading2, Subheading } from "../components/typography/headings";
+import { LoadingButton } from "@podkit/buttons/LoadingButton";
 
 type Props = {
     title: string;
-    subtitle: string;
+    subtitle?: string;
     isValid: boolean;
     isSaving?: boolean;
     error?: string;
     onSubmit(): void;
     submitButtonText?: string;
-    submitButtonType?: ButtonProps["type"];
+    submitButtonType?: ButtonProps["variant"];
     onCancel?(): void;
     cancelButtonText?: string;
-    cancelButtonType?: ButtonProps["type"];
+    cancelButtonType?: ButtonProps["variant"];
 };
 export const OnboardingStep: FC<Props> = ({
     title,
@@ -52,7 +53,7 @@ export const OnboardingStep: FC<Props> = ({
         <div className="flex flex-col items-center justify-center max-w-full">
             {/* Intentionally adjusting the size of the heading here */}
             <Heading2 className="text-4xl">{title}</Heading2>
-            <Subheading>{subtitle}</Subheading>
+            {subtitle && <Subheading>{subtitle}</Subheading>}
 
             <form className="mt-8 mb-14 max-w-lg" onSubmit={handleSubmit}>
                 {/* Form contents provided as children */}
@@ -63,24 +64,23 @@ export const OnboardingStep: FC<Props> = ({
                 <div className={"mt-4" + (onCancel ? " flex space-x-2" : "")}>
                     {onCancel && (
                         <Button
-                            htmlType="button"
-                            type={cancelButtonType || "secondary"}
+                            type="button"
+                            variant={cancelButtonType || "secondary"}
                             disabled={isSaving}
-                            size="block"
                             onClick={onCancel}
                         >
                             {cancelButtonText || "Cancel"}
                         </Button>
                     )}
-                    <Button
-                        htmlType="submit"
-                        type={submitButtonType || "primary"}
+                    <LoadingButton
+                        type="submit"
+                        variant={submitButtonType || "default"}
                         disabled={!isValid || isSaving}
-                        size="block"
+                        className="w-full"
                         loading={isSaving}
                     >
                         {submitButtonText || "Continue"}
-                    </Button>
+                    </LoadingButton>
                 </div>
             </form>
         </div>

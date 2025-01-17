@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2025 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -61,6 +61,16 @@ func (s *ProxyOIDCServiceHandler) UpdateClientConfig(ctx context.Context, req *c
 
 func (s *ProxyOIDCServiceHandler) DeleteClientConfig(ctx context.Context, req *connect_go.Request[v1.DeleteClientConfigRequest]) (*connect_go.Response[v1.DeleteClientConfigResponse], error) {
 	resp, err := s.Client.DeleteClientConfig(ctx, req.Msg)
+	if err != nil {
+		// TODO(milan): Convert to correct status code
+		return nil, err
+	}
+
+	return connect_go.NewResponse(resp), nil
+}
+
+func (s *ProxyOIDCServiceHandler) SetClientConfigActivation(ctx context.Context, req *connect_go.Request[v1.SetClientConfigActivationRequest]) (*connect_go.Response[v1.SetClientConfigActivationResponse], error) {
+	resp, err := s.Client.SetClientConfigActivation(ctx, req.Msg)
 	if err != nil {
 		// TODO(milan): Convert to correct status code
 		return nil, err

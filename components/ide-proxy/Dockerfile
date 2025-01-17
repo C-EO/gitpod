@@ -2,24 +2,23 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:153c0ba4dd4ef9272ed7440e8f2ffa233b09de3e24a36b490d2a10d750aaaddf as compress
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:52f88fede0eba350de7be98a4a803be5072e5ddcd8b5c7226d3ebbcd126fb388 as compress
 
-RUN apk add brotli gzip
+RUN apk add brotli gzip curl
 
-COPY components-local-app--app/components-local-app--app-linux-amd64/local-app /bin/gitpod-local-companion-linux-amd64
-COPY components-local-app--app/components-local-app--app-darwin-amd64/local-app /bin/gitpod-local-companion-darwin-amd64
-COPY components-local-app--app/components-local-app--app-windows-amd64/local-app.exe /bin/gitpod-local-companion-windows-amd64.exe
-COPY components-local-app--app/components-local-app--app-linux-arm64/local-app /bin/gitpod-local-companion-linux-arm64
-COPY components-local-app--app/components-local-app--app-darwin-arm64/local-app /bin/gitpod-local-companion-darwin-arm64
-COPY components-local-app--app/components-local-app--app-windows-386/local-app.exe /bin/gitpod-local-companion-windows-arm64.exe
-COPY components-local-app--app/components-local-app--app-windows-386/local-app.exe /bin/gitpod-local-companion-windows-386.exe
+# Gitpod CLI and Local App
+COPY components-local-app--app-with-manifest/bin/* /bin/
 
 RUN for FILE in `ls /bin/gitpod-local-companion*`;do \
   gzip -v -f -9 -k "$FILE"; \
-done
+  done
 
-FROM caddy/caddy:2.6.4-alpine
+RUN mkdir -p static/code
+RUN curl -o static/code/marketplace.json "https://raw.githubusercontent.com/open-vsx/publish-extensions/e5c7f0ac781b430049c9f07fed10ee5c388b0097/extension-control/extensions.json"
+
+FROM caddy/caddy:2.7.6-alpine
 
 COPY conf/Caddyfile /etc/caddy/Caddyfile
 COPY static /www/
+COPY --from=compress /static /www
 COPY --from=compress /bin /www/static/bin

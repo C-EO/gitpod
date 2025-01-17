@@ -16,5 +16,5 @@ export * from "./headless-workspace-log";
 export * from "./context-url";
 export * from "./teams-projects-protocol";
 export * from "./snapshot-url";
-export * from "./installation-admin-protocol";
 export * from "./webhook-event";
+export * from "./redis";

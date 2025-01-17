@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	v1 "github.com/gitpod-io/gitpod/components/public-api/go/experimental/v1"
 	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/gitpod"
 	supervisor "github.com/gitpod-io/gitpod/supervisor/api"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/cobra"
 	"golang.org/x/xerrors"
 	"google.golang.org/grpc"
@@ -23,28 +25,49 @@ import (
 
 var idpTokenOpts struct {
 	Audience []string
+	Decode   bool
+	Scope    string
 }
 
 var idpTokenCmd = &cobra.Command{
 	Use:   "token",
 	Short: "Requests an ID token for this workspace",
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) (err error) {
 		cmd.SilenceUsage = true
 
 		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 		defer cancel()
 
-		tkn, err := idpToken(ctx, idpTokenOpts.Audience)
+		tkn, err := idpToken(ctx, idpTokenOpts.Audience, idpTokenOpts.Scope)
+
+		token, _, err := jwt.NewParser().ParseUnverified(tkn, jwt.MapClaims{})
 		if err != nil {
 			return err
 		}
 
+		// If the user wants to decode the token, then do so.
+		if idpTokenOpts.Decode {
+
+			output := map[string]interface{}{
+				"Header":  token.Header,
+				"Payload": token.Claims,
+			}
+
+			// The header and payload are then marshalled into a map and printed to the screen.
+			outputPretty, err := json.MarshalIndent(output, "", "  ")
+			if err != nil {
+				return xerrors.Errorf("Failed to marshal output: %w", err)
+			}
+
+			fmt.Printf("%s\n", outputPretty)
+			return nil
+		}
 		fmt.Println(tkn)
 		return nil
 	},
 }
 
-func idpToken(ctx context.Context, audience []string) (idToken string, err error) {
+func idpToken(ctx context.Context, audience []string, scope string) (idToken string, err error) {
 	wsInfo, err := gitpod.GetWSInfo(ctx)
 	if err != nil {
 		return "", err
@@ -73,6 +96,7 @@ func idpToken(ctx context.Context, audience []string) (idToken string, err error
 		Msg: &v1.GetIDTokenRequest{
 			Audience:    audience,
 			WorkspaceId: wsInfo.WorkspaceId,
+			Scope:       scope,
 		},
 	})
 	if err != nil {
@@ -86,4 +110,7 @@ func init() {
 
 	idpTokenCmd.Flags().StringArrayVar(&idpTokenOpts.Audience, "audience", nil, "audience of the ID token")
 	_ = idpTokenCmd.MarkFlagRequired("audience")
+
+	idpTokenCmd.Flags().BoolVar(&idpTokenOpts.Decode, "decode", false, "decode token to JSON")
+	idpTokenCmd.Flags().StringVar(&idpTokenOpts.Scope, "scope", "", "scopes string of the ID token")
 }

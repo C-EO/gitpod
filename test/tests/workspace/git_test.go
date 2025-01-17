@@ -131,8 +131,8 @@ func TestGitActions(t *testing.T) {
 
 	f := features.New("GitActions").
 		WithLabel("component", "workspace").
-		Assess("it can run git actions", func(_ context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(5*len(tests))*time.Minute)
+		Assess("it can run git actions", func(testCtx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			ctx, cancel := context.WithTimeout(testCtx, time.Duration(5*len(tests))*time.Minute)
 			defer cancel()
 
 			api := integration.NewComponentAPI(ctx, cfg.Namespace(), kubeconfig, cfg.Client())
@@ -145,7 +145,6 @@ func TestGitActions(t *testing.T) {
 				FF   string
 			}{
 				{Name: "classic"},
-				// {Name: "pvc", FF: "persistent_volume_claim"},
 			}
 
 			for _, ff := range ffs {
@@ -200,7 +199,7 @@ func TestGitActions(t *testing.T) {
 					})
 				}
 			}
-			return ctx
+			return testCtx
 		}).
 		Feature()
 

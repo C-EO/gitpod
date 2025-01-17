@@ -4,13 +4,17 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { useCallback, useContext, useEffect, useState } from "react";
+import { ReactNode, useCallback, useContext, useState } from "react";
 import { UserContext } from "../user-context";
 import { CheckboxInputField } from "../components/forms/CheckboxInputField";
-import { User } from "@gitpod/gitpod-protocol";
-import SelectIDEComponent from "../components/SelectIDEComponent";
+import SelectIDEComponent, { isJetbrains } from "../components/SelectIDEComponent";
 import PillLabel from "../components/PillLabel";
 import { useUpdateCurrentUserMutation } from "../data/current-user/update-mutation";
+import { converter } from "../service/public-api";
+import { isOrganizationOwned } from "@gitpod/public-api-common/lib/user-utils";
+import Alert from "../components/Alert";
+import { useFeatureFlag } from "../data/featureflag-query";
+import { IDESettingsVersion } from "@gitpod/gitpod-protocol/lib/ide-protocol";
 
 export type IDEChangedTrackLocation = "workspace_list" | "workspace_start" | "preferences";
 interface SelectIDEProps {
@@ -21,65 +25,86 @@ export default function SelectIDE(props: SelectIDEProps) {
     const { user, setUser } = useContext(UserContext);
     const updateUser = useUpdateCurrentUserMutation();
 
-    // Only exec once when we access this component
-    useEffect(() => {
-        user && User.migrationIDESettings(user);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    const [defaultIde, setDefaultIde] = useState<string>(user?.editorSettings?.name || "code");
+    const [useLatestVersion, setUseLatestVersion] = useState<boolean>(user?.editorSettings?.version === "latest");
+    const [preferToolbox, setPreferToolbox] = useState<boolean>(user?.editorSettings?.preferToolbox || false);
+    const [ideWarning, setIdeWarning] = useState<ReactNode | undefined>(undefined);
+    const enableExperimentalJBTB = useFeatureFlag("enable_experimental_jbtb");
 
-    const [defaultIde, setDefaultIde] = useState<string>(user?.additionalData?.ideSettings?.defaultIde || "code");
-    const [useLatestVersion, setUseLatestVersion] = useState<boolean>(
-        user?.additionalData?.ideSettings?.useLatestVersion ?? false,
-    );
+    const isOrgOwnedUser = user && isOrganizationOwned(user);
 
     const actualUpdateUserIDEInfo = useCallback(
-        async (selectedIde: string, useLatestVersion: boolean) => {
-            const additionalData = user?.additionalData || {};
-            const ideSettings = additionalData.ideSettings || {};
+        async (selectedIde: string, useLatestVersion: boolean, preferToolbox: boolean) => {
+            // update stored autostart options to match useLatestVersion value set here
+            const workspaceAutostartOptions = user?.workspaceAutostartOptions?.map((o) => {
+                const option = converter.fromWorkspaceAutostartOption(o);
 
-            const updates = {
+                if (option.ideSettings) {
+                    option.ideSettings.useLatestVersion = useLatestVersion;
+                    option.ideSettings.preferToolbox = preferToolbox;
+                }
+
+                return option;
+            });
+
+            const updatedUser = await updateUser.mutateAsync({
                 additionalData: {
-                    ...additionalData,
+                    workspaceAutostartOptions,
                     ideSettings: {
-                        ...ideSettings,
-                        settingVersion: "2.0",
+                        settingVersion: IDESettingsVersion,
                         defaultIde: selectedIde,
                         useLatestVersion: useLatestVersion,
+                        preferToolbox: preferToolbox,
                     },
                 },
-            };
-            const newUserData = await updateUser.mutateAsync(updates);
-            setUser(newUserData);
+            });
+            setUser(updatedUser);
         },
-        [setUser, updateUser, user?.additionalData],
+        [setUser, updateUser, user?.workspaceAutostartOptions],
     );
 
     const actuallySetDefaultIde = useCallback(
         async (value: string) => {
-            await actualUpdateUserIDEInfo(value, useLatestVersion);
+            await actualUpdateUserIDEInfo(value, useLatestVersion, preferToolbox);
             setDefaultIde(value);
         },
-        [actualUpdateUserIDEInfo, useLatestVersion],
+        [actualUpdateUserIDEInfo, useLatestVersion, preferToolbox],
     );
 
     const actuallySetUseLatestVersion = useCallback(
         async (value: boolean) => {
-            await actualUpdateUserIDEInfo(defaultIde, value);
+            await actualUpdateUserIDEInfo(defaultIde, value, preferToolbox);
             setUseLatestVersion(value);
         },
-        [actualUpdateUserIDEInfo, defaultIde],
+        [actualUpdateUserIDEInfo, defaultIde, preferToolbox],
     );
 
-    //todo(ft): find a better way to group IDEs by vendor
-    const shouldShowJetbrainsNotice = !["code", "code-desktop", "xterm"].includes(defaultIde); // a really hacky way to get just JetBrains IDEs
+    const actuallySetPreferToolbox = useCallback(
+        async (value: boolean) => {
+            await actualUpdateUserIDEInfo(defaultIde, useLatestVersion, value);
+            setPreferToolbox(value);
+        },
+        [actualUpdateUserIDEInfo, defaultIde, useLatestVersion],
+    );
+
+    const shouldShowJetbrainsNotice = isJetbrains(defaultIde);
 
     return (
         <>
+            {ideWarning && (
+                <Alert type="warning" className="my-2 max-w-md">
+                    <span className="text-sm">{ideWarning}</span>
+                </Alert>
+            )}
+
             <div className="w-112 max-w-full my-4">
                 <SelectIDEComponent
                     onSelectionChange={actuallySetDefaultIde}
                     selectedIdeOption={defaultIde}
                     useLatest={useLatestVersion}
+                    setWarning={setIdeWarning}
+                    ignoreRestrictionScopes={isOrgOwnedUser ? ["configuration"] : ["configuration", "organization"]}
+                    hideVersions
                 />
             </div>
 
@@ -131,6 +156,24 @@ export default function SelectIDE(props: SelectIDEProps) {
                 checked={useLatestVersion}
                 onChange={(checked) => actuallySetUseLatestVersion(checked)}
             />
+
+            {enableExperimentalJBTB && (
+                <CheckboxInputField
+                    label={
+                        <span className="flex items-center gap-2">
+                            Launch in JetBrains Toolbox{" "}
+                            <PillLabel type="warn">
+                                <a href="https://www.gitpod.io/docs/references/gitpod-releases">
+                                    <span className="text-xs">BETA</span>
+                                </a>
+                            </PillLabel>
+                        </span>
+                    }
+                    hint={<span>Launch JetBrains IDEs in the JetBrains Toolbox.</span>}
+                    checked={preferToolbox}
+                    onChange={(checked) => actuallySetPreferToolbox(checked)}
+                />
+            )}
         </>
     );
 }

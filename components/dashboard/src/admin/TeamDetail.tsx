@@ -6,7 +6,7 @@
 
 import dayjs from "dayjs";
 import { useEffect, useState } from "react";
-import { Team, TeamMemberInfo, TeamMemberRole } from "@gitpod/gitpod-protocol";
+import { Team, TeamMemberInfo, TeamMemberRole, VALID_ORG_MEMBER_ROLES } from "@gitpod/gitpod-protocol";
 import { getGitpodService } from "../service/service";
 import { Item, ItemField, ItemsList } from "../components/ItemsList";
 import DropDown from "../components/DropDown";
@@ -19,6 +19,7 @@ import { CostCenterJSON, CostCenter_BillingStrategy } from "@gitpod/gitpod-proto
 import Modal from "../components/Modal";
 import { Heading2 } from "../components/typography/headings";
 import search from "../icons/search.svg";
+import { Button } from "@podkit/buttons/Button";
 
 export default function TeamDetail(props: { team: Team }) {
     const { team } = props;
@@ -32,6 +33,7 @@ export default function TeamDetail(props: { team: Team }) {
     const [creditNote, setCreditNote] = useState<{ credits: number; note?: string }>({ credits: 0 });
     const [editAddCreditNote, setEditAddCreditNote] = useState<boolean>(false);
 
+    const attributionId = AttributionId.render(AttributionId.create(team));
     const initialize = () => {
         (async () => {
             const members = await getGitpodService().server.adminGetTeamMembers(team.id);
@@ -39,16 +41,12 @@ export default function TeamDetail(props: { team: Team }) {
                 setTeamMembers(members);
             }
         })();
-        getGitpodService()
-            .server.adminGetBillingMode(AttributionId.render({ kind: "team", teamId: team.id }))
-            .then((bm) => setBillingMode(bm));
-        const attributionId = AttributionId.render(AttributionId.create(team));
         getGitpodService().server.adminGetBillingMode(attributionId).then(setBillingMode);
         getGitpodService().server.adminGetCostCenter(attributionId).then(setCostCenter);
         getGitpodService().server.adminGetUsageBalance(attributionId).then(setUsageBalance);
     };
 
-    useEffect(initialize, [team]);
+    useEffect(initialize, [team, attributionId]);
 
     useEffect(() => {
         if (!costCenter) {
@@ -207,16 +205,10 @@ export default function TeamDetail(props: { team: Team }) {
                                     <DropDown
                                         customClasses="w-32"
                                         activeEntry={m.role}
-                                        entries={[
-                                            {
-                                                title: "owner",
-                                                onClick: () => setTeamMemberRole(m.userId, "owner"),
-                                            },
-                                            {
-                                                title: "member",
-                                                onClick: () => setTeamMemberRole(m.userId, "member"),
-                                            },
-                                        ]}
+                                        entries={VALID_ORG_MEMBER_ROLES.map((role) => ({
+                                            title: role,
+                                            onClick: () => setTeamMemberRole(m.userId, role),
+                                        }))}
                                     />
                                 </span>
                             </ItemField>
@@ -228,16 +220,12 @@ export default function TeamDetail(props: { team: Team }) {
                 visible={editSpendingLimit}
                 onClose={() => setEditSpendingLimit(false)}
                 title="Change Usage Limit"
-                onEnter={() => false}
                 buttons={[
-                    <button
+                    <Button
                         disabled={usageLimit === costCenter?.spendingLimit}
                         onClick={async () => {
                             if (usageLimit !== undefined) {
-                                await getGitpodService().server.adminSetUsageLimit(
-                                    AttributionId.render(AttributionId.create(team)),
-                                    usageLimit || 0,
-                                );
+                                await getGitpodService().server.adminSetUsageLimit(attributionId, usageLimit || 0);
                                 setUsageLimit(undefined);
                                 initialize();
                                 setEditSpendingLimit(false);
@@ -245,7 +233,7 @@ export default function TeamDetail(props: { team: Team }) {
                         }}
                     >
                         Change
-                    </button>,
+                    </Button>,
                 ]}
             >
                 <p className="pb-4 text-gray-500 text-base">Change the usage limit in credits per month.</p>
@@ -263,17 +251,16 @@ export default function TeamDetail(props: { team: Team }) {
                 </div>
             </Modal>
             <Modal
-                onEnter={() => false}
                 visible={editAddCreditNote}
                 onClose={() => setEditAddCreditNote(false)}
                 title="Add Credits"
                 buttons={[
-                    <button
+                    <Button
                         disabled={creditNote.credits === 0 || !creditNote.note}
                         onClick={async () => {
                             if (creditNote.credits !== 0 && !!creditNote.note) {
                                 await getGitpodService().server.adminAddUsageCreditNote(
-                                    AttributionId.render(AttributionId.create(team)),
+                                    attributionId,
                                     creditNote.credits,
                                     creditNote.note,
                                 );
@@ -284,7 +271,7 @@ export default function TeamDetail(props: { team: Team }) {
                         }}
                     >
                         Add Credits
-                    </button>,
+                    </Button>,
                 ]}
             >
                 <p>Adds or subtracts the amount of credits from this account.</p>

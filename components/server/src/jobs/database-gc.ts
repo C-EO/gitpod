@@ -16,17 +16,16 @@ export class DatabaseGarbageCollector implements Job {
     @inject(Config) protected readonly config: Config;
 
     public name = "database-gc";
-    public lockId = ["database-gc"];
     public frequencyMs = 30000; // every 30 seconds
 
-    public async run(): Promise<void> {
+    public async run(): Promise<number | undefined> {
         if (!this.config.runDbDeleter) {
             log.info("database-gc: deleter is disabled");
             return;
         }
 
         try {
-            await this.periodicDbDeleter.runOnce();
+            return await this.periodicDbDeleter.runOnce();
         } catch (err) {
             log.error("database-gc: error during run", err);
             throw err;

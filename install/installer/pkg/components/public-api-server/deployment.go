@@ -11,6 +11,7 @@ import (
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 
 	"github.com/gitpod-io/gitpod/common-go/baseserver"
+	"github.com/gitpod-io/gitpod/common-go/kubernetes"
 
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
@@ -29,6 +30,7 @@ const (
 )
 
 func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
+	//nolint:typecheck
 	configHash, err := common.ObjectHash(configmap(ctx))
 	if err != nil {
 		return nil, err
@@ -48,6 +50,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 			},
 		},
 		databaseSecretVolume,
+		common.CAVolume(),
 	}
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -57,6 +60,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 			SubPath:   configJSONFilename,
 		},
 		databaseSecretMount,
+		common.CAVolumeMount(),
 	}
 
 	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
@@ -86,18 +90,16 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 	volumeMounts = append(volumeMounts, authMounts...)
 
 	labels := common.CustomizeLabel(ctx, Component, common.TypeMetaDeployment)
+
+	imageName := ctx.ImageName(ctx.Config.Repository, Component, ctx.VersionManifest.Components.PublicAPIServer.Version)
 	return []runtime.Object{
 		&appsv1.Deployment{
 			TypeMeta: common.TypeMetaDeployment,
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      Component,
-				Namespace: ctx.Namespace,
-				Labels:    labels,
-				Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment, func() map[string]string {
-					return map[string]string{
-						common.AnnotationConfigChecksum: configHash,
-					}
-				}),
+				Name:        Component,
+				Namespace:   ctx.Namespace,
+				Labels:      labels,
+				Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment),
 			},
 			Spec: appsv1.DeploymentSpec{
 				Selector: &metav1.LabelSelector{MatchLabels: common.DefaultLabels(Component)},
@@ -105,10 +107,15 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 				Strategy: common.DeploymentStrategy,
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:        Component,
-						Namespace:   ctx.Namespace,
-						Labels:      labels,
-						Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment),
+						Name:      Component,
+						Namespace: ctx.Namespace,
+						Labels:    labels,
+						Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment, func() map[string]string {
+							return map[string]string{
+								common.AnnotationConfigChecksum: configHash,
+								kubernetes.ImageNameAnnotation:  imageName,
+							}
+						}),
 					},
 					Spec: corev1.PodSpec{
 						Affinity:                      cluster.WithNodeAffinityHostnameAntiAffinity(Component, cluster.AffinityLabelMeta),
@@ -118,11 +125,14 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 						DNSPolicy:                     corev1.DNSClusterFirst,
 						RestartPolicy:                 corev1.RestartPolicyAlways,
 						TerminationGracePeriodSeconds: pointer.Int64(30),
-						InitContainers:                []corev1.Container{*common.DatabaseWaiterContainer(ctx)},
+						InitContainers: []corev1.Container{
+							*common.DatabaseMigrationWaiterContainer(ctx),
+							*common.RedisWaiterContainer(ctx),
+						},
 						Containers: []corev1.Container{
 							{
 								Name:  Component,
-								Image: ctx.ImageName(ctx.Config.Repository, Component, ctx.VersionManifest.Components.PublicAPIServer.Version),
+								Image: imageName,
 								Args: []string{
 									"run",
 									fmt.Sprintf("--config=%s", configMountPath),

@@ -4,23 +4,43 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { IDESettings, TaskConfig, User, Workspace } from "@gitpod/gitpod-protocol";
-import { ConfigCatClientFactory } from "@gitpod/gitpod-protocol/lib/experiments/configcat-server";
-import { IDEClient, IDEOptions } from "@gitpod/gitpod-protocol/lib/ide-protocol";
+import { IDESettings, User, Workspace } from "@gitpod/gitpod-protocol";
+import { IDEClient, IDEOption, IDEOptions, IDESettingsVersion } from "@gitpod/gitpod-protocol/lib/ide-protocol";
 import * as IdeServiceApi from "@gitpod/ide-service-api/lib/ide.pb";
 import {
     IDEServiceClient,
     IDEServiceDefinition,
     ResolveWorkspaceConfigResponse,
 } from "@gitpod/ide-service-api/lib/ide.pb";
+import { getPrimaryEmail } from "@gitpod/public-api-common/lib/user-utils";
 import { inject, injectable } from "inversify";
 import { AuthorizationService } from "./user/authorization-service";
+import { ApplicationError, ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
+
+interface IDEVersion {
+    version: string;
+    image: string;
+    imageLayers?: string[];
+}
+
+interface ExtendedIDEOption extends Omit<IDEOption, "pinnable"> {
+    versions?: IDEVersion[];
+}
+
+interface ExtendedIDEOptions extends Omit<IDEOptions, "options"> {
+    options: { [key: string]: ExtendedIDEOption };
+}
+
+export interface ExtendedIDESettings extends IDESettings {
+    pinnedIDEversions?: { [key: string]: string };
+}
 
 export interface IDEConfig {
     supervisorImage: string;
-    ideOptions: IDEOptions;
+    ideOptions: ExtendedIDEOptions;
     clients?: { [id: string]: IDEClient };
 }
+
 @injectable()
 export class IDEService {
     @inject(IDEServiceDefinition.name)
@@ -28,9 +48,6 @@ export class IDEService {
 
     @inject(AuthorizationService)
     protected readonly authService: AuthorizationService;
-
-    @inject(ConfigCatClientFactory)
-    protected readonly configCatClientFactory: ConfigCatClientFactory;
 
     private cacheConfig?: IDEConfig;
 
@@ -50,12 +67,23 @@ export class IDEService {
         }
     }
 
+    async isIDEAvailable(ide: string, request: { user: { id: string; email?: string } }): Promise<boolean> {
+        if (!ide) {
+            return false;
+        }
+        const config = await this.getIDEConfig({ user: request.user });
+        return Object.keys(config.ideOptions.options).includes(ide);
+    }
+
     migrateSettings(user: User): IDESettings | undefined {
-        if (!user?.additionalData?.ideSettings || user.additionalData.ideSettings.settingVersion === "2.0") {
+        if (
+            !user?.additionalData?.ideSettings ||
+            user.additionalData.ideSettings.settingVersion === IDESettingsVersion
+        ) {
             return undefined;
         }
         const newIDESettings: IDESettings = {
-            settingVersion: "2.0",
+            settingVersion: IDESettingsVersion,
         };
         const ideSettings = user.additionalData.ideSettings;
         if (ideSettings.useDesktopIde) {
@@ -73,27 +101,37 @@ export class IDEService {
             newIDESettings.defaultIde = "code";
             newIDESettings.useLatestVersion = useLatest;
         }
+
+        if (ideSettings.defaultIde && !this.isIDEAvailable(ideSettings.defaultIde, { user })) {
+            ideSettings.defaultIde = "code";
+        }
         return newIDESettings;
     }
 
     async resolveWorkspaceConfig(
         workspace: Workspace,
         user: User,
-        userSelectedIdeSettings?: IDESettings,
+        userSelectedIdeSettings?: ExtendedIDESettings,
     ): Promise<ResolveWorkspaceConfigResponse> {
         const workspaceType =
             workspace.type === "prebuild" ? IdeServiceApi.WorkspaceType.PREBUILD : IdeServiceApi.WorkspaceType.REGULAR;
 
+        // in case users have `auto-start` options set
+        if (userSelectedIdeSettings?.defaultIde && !this.isIDEAvailable(userSelectedIdeSettings.defaultIde, { user })) {
+            userSelectedIdeSettings.defaultIde = "code";
+        }
+
         const req: IdeServiceApi.ResolveWorkspaceConfigRequest = {
             type: workspaceType,
             context: JSON.stringify(workspace.context),
-            ideSettings: JSON.stringify(userSelectedIdeSettings || user.additionalData?.ideSettings),
+            ideSettings: JSON.stringify({ ...user.additionalData?.ideSettings, ...userSelectedIdeSettings }),
             workspaceConfig: JSON.stringify(workspace.config),
             user: {
                 id: user.id,
-                email: User.getPrimaryEmail(user),
+                email: getPrimaryEmail(user),
             },
         };
+
         for (let attempt = 0; attempt < 15; attempt++) {
             if (attempt != 0) {
                 await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -107,19 +145,40 @@ export class IDEService {
         throw new Error("failed to resolve workspace IDE configuration");
     }
 
-    resolveGitpodTasks(ws: Workspace, ideConfig: ResolveWorkspaceConfigResponse): TaskConfig[] {
-        const tasks: TaskConfig[] = [];
-        if (ws.config.tasks) {
-            tasks.push(...ws.config.tasks);
+    async getIDEVersions(
+        ide: string,
+        request: { user: { id: string; email?: string } },
+    ): Promise<string[] | undefined> {
+        const config = await this.getIDEConfig(request);
+        if (!config) {
+            return undefined;
         }
-        if (ideConfig.tasks) {
-            try {
-                let ideTasks: TaskConfig[] = JSON.parse(ideConfig.tasks);
-                tasks.push(...ideTasks);
-            } catch (e) {
-                console.error("failed get tasks from ide config:", e);
+
+        const ideOption: ExtendedIDEOption | undefined = config.ideOptions.options[ide];
+        if (!ideOption?.versions || ideOption.versions.length === 0) {
+            return undefined;
+        }
+
+        return ideOption.versions.map((v) => v.version);
+    }
+
+    async checkEditorsAllowed(userId: string, editorNames: string[]) {
+        const allEditors = await this.getIDEConfig({ user: { id: userId } }).then((d) =>
+            Object.keys(d.ideOptions.options),
+        );
+        const notAllowedList = editorNames.filter((e) => !allEditors.includes(e as string));
+        if (notAllowedList.length > 0) {
+            if (notAllowedList.length === 1) {
+                throw new ApplicationError(
+                    ErrorCodes.BAD_REQUEST,
+                    `editor ${notAllowedList[0]} is not allowed in installation`,
+                );
+            } else {
+                throw new ApplicationError(
+                    ErrorCodes.BAD_REQUEST,
+                    `editors ${notAllowedList.join(",")} are not allowed in installation`,
+                );
             }
         }
-        return tasks;
     }
 }

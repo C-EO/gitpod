@@ -64,6 +64,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		return nil
 	})
 
+	//nolint:typecheck
 	configHash, err := common.ObjectHash(configmap(ctx))
 	if err != nil {
 		return nil, err
@@ -101,7 +102,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 						DNSPolicy:                     corev1.DNSClusterFirst,
 						RestartPolicy:                 corev1.RestartPolicyAlways,
 						TerminationGracePeriodSeconds: pointer.Int64(30),
-						InitContainers:                []corev1.Container{*common.DatabaseWaiterContainer(ctx)},
+						InitContainers:                []corev1.Container{*common.DatabaseMigrationWaiterContainer(ctx)},
 						Volumes:                       volumes,
 						Containers: []corev1.Container{{
 							Name:            Component,

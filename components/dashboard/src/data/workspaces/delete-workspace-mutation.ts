@@ -5,11 +5,9 @@
  */
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { workspacesService } from "../../service/public-api";
-import { getGitpodService } from "../../service/service";
+import { workspaceClient } from "../../service/public-api";
 import { getListWorkspacesQueryKey, ListWorkspacesQueryResult } from "./list-workspaces-query";
 import { useCurrentOrg } from "../organizations/orgs-query";
-import { useFeatureFlag } from "../featureflag-query";
 
 type DeleteWorkspaceArgs = {
     workspaceId: string;
@@ -17,14 +15,11 @@ type DeleteWorkspaceArgs = {
 
 export const useDeleteWorkspaceMutation = () => {
     const queryClient = useQueryClient();
-    const usePublicApiWorkspacesService = useFeatureFlag("publicApiExperimentalWorkspaceService");
     const org = useCurrentOrg();
 
     return useMutation({
         mutationFn: async ({ workspaceId }: DeleteWorkspaceArgs) => {
-            return usePublicApiWorkspacesService
-                ? await workspacesService.deleteWorkspace({ workspaceId })
-                : await getGitpodService().server.deleteWorkspace(workspaceId);
+            return await workspaceClient.deleteWorkspace({ workspaceId });
         },
         onSuccess: (_, { workspaceId }) => {
             const queryKey = getListWorkspacesQueryKey(org.data?.id);
@@ -32,7 +27,7 @@ export const useDeleteWorkspaceMutation = () => {
             // Remove workspace from cache so it's reflected right away
             queryClient.setQueryData<ListWorkspacesQueryResult>(queryKey, (oldWorkspacesData) => {
                 return oldWorkspacesData?.filter((info) => {
-                    return info.workspace.id !== workspaceId;
+                    return info.id !== workspaceId;
                 });
             });
 

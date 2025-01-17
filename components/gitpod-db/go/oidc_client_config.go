@@ -26,9 +26,15 @@ type OIDCClientConfig struct {
 
 	Active bool `gorm:"column:active;type:tinyint;default:0;" json:"active"`
 
+	Verified *bool `gorm:"column:verified;type:tinyint;default:0;" json:"verified"`
+
 	LastModified time.Time `gorm:"column:_lastModified;type:timestamp;default:CURRENT_TIMESTAMP(6);" json:"_lastModified"`
 	// deleted is reserved for use by periodic deleter.
 	_ bool `gorm:"column:deleted;type:tinyint;default:0;" json:"deleted"`
+}
+
+func BoolPointer(b bool) *bool {
+	return &b
 }
 
 func (c *OIDCClientConfig) TableName() string {
@@ -51,11 +57,21 @@ type OIDCSpec struct {
 
 	// Scope specifies optional requested permissions.
 	Scopes []string `json:"scopes"`
+
+	// CelExpression is an optional expression that can be used to determine if the client should be allowed to authenticate.
+	CelExpression string `json:"celExpression"`
+
+	// UsePKCE specifies if the client should use PKCE for the OAuth flow.
+	UsePKCE bool `json:"usePKCE"`
 }
 
 func CreateOIDCClientConfig(ctx context.Context, conn *gorm.DB, cfg OIDCClientConfig) (OIDCClientConfig, error) {
 	if cfg.ID == uuid.Nil {
-		return OIDCClientConfig{}, errors.New("id must be set")
+		return OIDCClientConfig{}, errors.New("ID must be set")
+	}
+
+	if cfg.OrganizationID == uuid.Nil {
+		return OIDCClientConfig{}, errors.New("organization ID must be set")
 	}
 
 	if cfg.Issuer == "" {
@@ -170,7 +186,7 @@ func DeleteOIDCClientConfig(ctx context.Context, conn *gorm.DB, id, organization
 	return nil
 }
 
-func GetOIDCClientConfigByOrgSlug(ctx context.Context, conn *gorm.DB, slug string) (OIDCClientConfig, error) {
+func GetActiveOIDCClientConfigByOrgSlug(ctx context.Context, conn *gorm.DB, slug string) (OIDCClientConfig, error) {
 	var config OIDCClientConfig
 
 	if slug == "" {
@@ -179,15 +195,18 @@ func GetOIDCClientConfigByOrgSlug(ctx context.Context, conn *gorm.DB, slug strin
 
 	tx := conn.
 		WithContext(ctx).
-		Table((&OIDCClientConfig{}).TableName()).
-		// TODO: is there a better way to reference table names here and below?
-		Joins("JOIN d_b_team team ON team.id = d_b_oidc_client_config.organizationId").
+		Table(fmt.Sprintf("%s as config", (&OIDCClientConfig{}).TableName())).
+		Joins(fmt.Sprintf("JOIN %s AS team ON team.id = config.organizationId", (&Organization{}).TableName())).
 		Where("team.slug = ?", slug).
-		Where("d_b_oidc_client_config.deleted = ?", 0).
+		Where("config.deleted = ?", 0).
+		Where("config.active = ?", 1).
 		First(&config)
 
 	if tx.Error != nil {
-		return OIDCClientConfig{}, fmt.Errorf("failed to get oidc client config by org slug (slug: %s): %v", slug, tx.Error)
+		if errors.Is(tx.Error, gorm.ErrRecordNotFound) {
+			return OIDCClientConfig{}, fmt.Errorf("OIDC Client Config for Organization (slug: %s) does not exist: %w", slug, ErrorNotFound)
+		}
+		return OIDCClientConfig{}, fmt.Errorf("Failed to retrieve OIDC client config: %v", tx.Error)
 	}
 
 	return config, nil
@@ -225,6 +244,9 @@ func UpdateOIDCClientConfig(ctx context.Context, conn *gorm.DB, cipher Cipher, u
 
 				// Set the serialized contents on our desired update object
 				update.Data = encrypted
+
+				// Each update should unverify the entry
+				update.Verified = BoolPointer(false)
 			}
 
 			updateTx := tx.
@@ -237,6 +259,7 @@ func UpdateOIDCClientConfig(ctx context.Context, conn *gorm.DB, cipher Cipher, u
 			}
 
 			if updateTx.RowsAffected == 0 {
+				// FIXME(at) this should not return an error in case of empty update
 				return fmt.Errorf("OIDC client config ID: %s does not exist: %w", update.ID.String(), ErrorNotFound)
 			}
 
@@ -251,16 +274,8 @@ func UpdateOIDCClientConfig(ctx context.Context, conn *gorm.DB, cipher Cipher, u
 	return nil
 }
 
-func ActivateClientConfig(ctx context.Context, conn *gorm.DB, id uuid.UUID) error {
-	return setClientConfigActiveFlag(ctx, conn, id, true)
-}
-
-func DeactivateClientConfig(ctx context.Context, conn *gorm.DB, id uuid.UUID) error {
-	return setClientConfigActiveFlag(ctx, conn, id, false)
-}
-
-func setClientConfigActiveFlag(ctx context.Context, conn *gorm.DB, id uuid.UUID, active bool) error {
-	_, err := GetOIDCClientConfig(ctx, conn, id)
+func SetClientConfigActiviation(ctx context.Context, conn *gorm.DB, id uuid.UUID, active bool) error {
+	config, err := GetOIDCClientConfig(ctx, conn, id)
 	if err != nil {
 		return err
 	}
@@ -278,6 +293,51 @@ func setClientConfigActiveFlag(ctx context.Context, conn *gorm.DB, id uuid.UUID,
 	if tx.Error != nil {
 		return fmt.Errorf("failed to set oidc client config as active to %d (id: %s): %v", value, id.String(), tx.Error)
 	}
+
+	if active {
+		tx := conn.
+			WithContext(ctx).
+			Table((&OIDCClientConfig{}).TableName()).
+			Where("id != ?", id.String()).
+			Where("organizationId = ?", config.OrganizationID).
+			Where("deleted = ?", 0).
+			Update("active", 0)
+		if tx.Error != nil {
+			return fmt.Errorf("failed to set other oidc client configs as inactive: %v", tx.Error)
+		}
+	}
+
+	return nil
+}
+
+func VerifyClientConfig(ctx context.Context, conn *gorm.DB, id uuid.UUID) error {
+	return setClientConfigVerifiedFlag(ctx, conn, id, true)
+}
+
+func UnverifyClientConfig(ctx context.Context, conn *gorm.DB, id uuid.UUID) error {
+	return setClientConfigVerifiedFlag(ctx, conn, id, false)
+}
+
+func setClientConfigVerifiedFlag(ctx context.Context, conn *gorm.DB, id uuid.UUID, verified bool) error {
+	_, err := GetOIDCClientConfig(ctx, conn, id)
+	if err != nil {
+		return err
+	}
+
+	value := 0
+	if verified {
+		value = 1
+	}
+
+	tx := conn.
+		WithContext(ctx).
+		Table((&OIDCClientConfig{}).TableName()).
+		Where("id = ?", id.String()).
+		Update("verified", value)
+	if tx.Error != nil {
+		return fmt.Errorf("failed to set oidc client config as active to %d (id: %s): %v", value, id.String(), tx.Error)
+	}
+
 	return nil
 }
 
@@ -293,6 +353,9 @@ func partialUpdateOIDCSpec(old, new OIDCSpec) OIDCSpec {
 	if new.RedirectURL != "" {
 		old.RedirectURL = new.RedirectURL
 	}
+
+	old.CelExpression = new.CelExpression
+	old.UsePKCE = new.UsePKCE
 
 	if !oidcScopesEqual(old.Scopes, new.Scopes) {
 		old.Scopes = new.Scopes

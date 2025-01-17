@@ -10,7 +10,6 @@ import (
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
 	dockerregistry "github.com/gitpod-io/gitpod/installer/pkg/components/docker-registry"
-	wsmanager "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager"
 	wsmanagermk2 "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager-mk2"
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 
@@ -23,7 +22,6 @@ import (
 	"k8s.io/utils/pointer"
 )
 
-const wsManagerClientTlsVolume = "ws-manager-client-tls-certs"
 const wsManagerMk2ClientTlsVolume = "ws-manager-mk2-client-tls-certs"
 
 func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
@@ -47,10 +45,10 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 				},
 			},
 			{
-				Name: wsManagerClientTlsVolume,
+				Name: wsManagerMk2ClientTlsVolume,
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName: wsmanager.TLSSecretNameClient,
+						SecretName: wsmanagermk2.TLSSecretNameClient,
 					},
 				},
 			},
@@ -61,8 +59,8 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 				MountPath: "/mnt/certificates",
 			},
 			{
-				Name:      wsManagerClientTlsVolume,
-				MountPath: "/ws-manager-client-tls-certs",
+				Name:      wsManagerMk2ClientTlsVolume,
+				MountPath: "/ws-manager-mk2-client-tls-certs",
 				ReadOnly:  true,
 			},
 		}
@@ -74,6 +72,7 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 		hashObj = append(hashObj, objs...)
 	}
 
+	//nolint:typecheck
 	configHash, err := common.ObjectHash(hashObj, nil)
 	if err != nil {
 		return nil, err
@@ -126,43 +125,6 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 					},
 				})
 			}
-		}
-
-		if ucfg.Workspace.UseWsmanagerMk2 {
-			var vs []corev1.Volume
-			for _, v := range volumes {
-				if v.Name == wsManagerClientTlsVolume {
-					continue
-				}
-
-				vs = append(vs, v)
-			}
-			volumes = vs
-
-			volumes = append(volumes, corev1.Volume{
-				Name: wsManagerMk2ClientTlsVolume,
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: wsmanagermk2.TLSSecretNameClient,
-					},
-				},
-			})
-
-			var vm []corev1.VolumeMount
-			for _, v := range volumeMounts {
-				if v.Name == wsManagerClientTlsVolume {
-					continue
-				}
-
-				vm = append(vm, v)
-			}
-			volumeMounts = vm
-
-			volumeMounts = append(volumeMounts, corev1.VolumeMount{
-				Name:      wsManagerMk2ClientTlsVolume,
-				MountPath: "/ws-manager-mk2-client-tls-certs",
-				ReadOnly:  true,
-			})
 		}
 
 		return nil
@@ -227,6 +189,11 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 					RestartPolicy:                 corev1.RestartPolicyAlways,
 					TerminationGracePeriodSeconds: pointer.Int64(30),
 					InitContainers:                initContainers,
+					Tolerations: []corev1.Toleration{
+						{
+							Operator: "Exists",
+						},
+					},
 					Containers: []corev1.Container{{
 						Name:            Component,
 						Image:           ctx.ImageName(ctx.Config.Repository, Component, ctx.VersionManifest.Components.RegistryFacade.Version),
@@ -241,6 +208,7 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 						Ports: []corev1.ContainerPort{{
 							Name:          ContainerPortName,
 							ContainerPort: ServicePort,
+							HostPort:      ServicePort,
 						}},
 						SecurityContext: &corev1.SecurityContext{
 							Privileged:               pointer.Bool(false),
@@ -284,7 +252,7 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 									Port: intstr.IntOrString{IntVal: ReadinessPort},
 								},
 							},
-							InitialDelaySeconds: 5,
+							InitialDelaySeconds: 10,
 							PeriodSeconds:       5,
 							TimeoutSeconds:      2,
 							SuccessThreshold:    2,
@@ -342,7 +310,6 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 						},
 						common.CAVolume(),
 					}, volumes...),
-					Tolerations: common.GPUToleration(),
 				},
 			},
 			UpdateStrategy: common.DaemonSetRolloutStrategy(),

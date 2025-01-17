@@ -6,6 +6,8 @@ package v1
 
 import (
 	wsk8s "github.com/gitpod-io/gitpod/common-go/kubernetes"
+	"github.com/gitpod-io/gitpod/common-go/log"
+	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -55,6 +57,13 @@ type WorkspaceSpec struct {
 	Ports []PortSpec `json:"ports"`
 
 	SshPublicKeys []string `json:"sshPublicKeys,omitempty"`
+
+	// TODO: make StorageQuota Required in the future, avoid for now to avoid runtime failures for existing workspaces
+
+	// the XFS quota to enforce on the workspace's /workspace folder
+	StorageQuota int `json:"storageQuota,omitempty"`
+
+	SSHGatewayCAPublicKey string `json:"sshGatewayCAPublicKey,omitempty"`
 }
 
 type Ownership struct {
@@ -104,6 +113,9 @@ type TimeoutSpec struct {
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:Pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h)?)+$"
 	ClosedTimeout *metav1.Duration `json:"closed,omitempty"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h)?)+$"
+	MaximumLifetime *metav1.Duration `json:"maximumLifetime,omitempty"`
 }
 
 type AdmissionSpec struct {
@@ -119,6 +131,14 @@ const (
 	AdmissionLevelEveryone AdmissionLevel = "Everyone"
 )
 
+// +kubebuilder:validation:Enum=Http;Https
+type PortProtocol string
+
+const (
+	PortProtocolHttp  PortProtocol = "Http"
+	PortProtocolHttps PortProtocol = "Https"
+)
+
 type PortSpec struct {
 	// +kubebuilder:validation:Required
 	Port uint32 `json:"port"`
@@ -126,13 +146,52 @@ type PortSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default=Owner
 	Visibility AdmissionLevel `json:"visibility"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:default=Http
+	Protocol PortProtocol `json:"protocol"`
+}
+
+func (ps PortSpec) Equal(other PortSpec) bool {
+	if ps.Port != other.Port {
+		return false
+	}
+
+	if ps.Visibility != other.Visibility {
+		return false
+	}
+
+	if ps.Protocol != other.Protocol {
+		return false
+	}
+
+	return true
+}
+
+type WorkspaceImageInfo struct {
+	// +kubebuilder:validation:Required
+	TotalSize int64 `json:"totalSize"`
+
+	// +kubebuilder:validation:Optional
+	WorkspaceImageSize int64 `json:"workspaceImageSize,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	WorkspaceImageRef string `json:"workspaceImageRef,omitempty"`
 }
 
 // WorkspaceStatus defines the observed state of Workspace
 type WorkspaceStatus struct {
-	PodStarts  int    `json:"podStarts"`
-	URL        string `json:"url,omitempty"`
-	OwnerToken string `json:"ownerToken,omitempty"`
+	PodStarts int `json:"podStarts"`
+
+	// +kubebuilder:validation:Optional
+	PodRecreated int `json:"podRecreated"`
+	// +kubebuilder:validation:Optional
+	PodDeletionTime *metav1.Time `json:"podDeletionTime,omitempty"`
+	// +kubebuilder:validation:Optional
+	PodStoppingTime *metav1.Time `json:"podStoppingTime,omitempty"`
+
+	URL        string `json:"url,omitempty" scrub:"redact"`
+	OwnerToken string `json:"ownerToken,omitempty" scrub:"redact"`
 
 	// +kubebuilder:default=Unknown
 	Phase WorkspacePhase `json:"phase,omitempty"`
@@ -149,13 +208,26 @@ type WorkspaceStatus struct {
 
 	// +kubebuilder:validation:Optional
 	Runtime *WorkspaceRuntimeStatus `json:"runtime,omitempty"`
+
+	Storage StorageStatus `json:"storage,omitempty"`
+
+	LastActivity *metav1.Time `json:"lastActivity,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	ImageInfo *WorkspaceImageInfo `json:"imageInfo,omitempty"`
 }
 
 func (s *WorkspaceStatus) SetCondition(cond metav1.Condition) {
 	s.Conditions = wsk8s.AddUniqueCondition(s.Conditions, cond)
 }
 
-// +kubebuilder:validation:Enum=Deployed;Failed;Timeout;FirstUserActivity;Closed;HeadlessTaskFailed;StoppedByRequest;Aborted;ContentReady;EverReady;BackupComplete;BackupFailure
+type StorageStatus struct {
+	VolumeName     string `json:"volumeName"`
+	AttachedDevice string `json:"attachedDevice"`
+	MountPath      string `json:"mountPath"`
+}
+
+// +kubebuilder:validation:Enum=Deployed;Failed;Timeout;FirstUserActivity;Closed;HeadlessTaskFailed;StoppedByRequest;Aborted;ContentReady;EverReady;BackupComplete;BackupFailure;Refresh;NodeDisappeared;ThroughputAdjusted
 type WorkspaceCondition string
 
 const (
@@ -200,6 +272,28 @@ const (
 
 	// Refresh is used to ensure that we operate on the latest version of the workspace
 	WorkspaceConditionRefresh WorkspaceCondition = "Refresh"
+
+	// NodeDisappeared is true if the workspace's node disappeared before the workspace was stopped
+	WorkspaceConditionNodeDisappeared WorkspaceCondition = "NodeDisappeared"
+
+	VolumeAttachRequest WorkspaceCondition = "VolumeAttachRequest"
+	// VolumeAttached is true if the workspace's volume has been attached to the node
+	VolumeAttached WorkspaceCondition = "VolumeAttached"
+	// VolumeMounted is true if the workspace's volume has been mounted on the node
+	VolumeMounted WorkspaceCondition = "VolumeMounted"
+
+	// WorkspaceContainerRunning is true if the workspace container is running.
+	// Used to determine if a backup can be taken, only once the container is stopped.
+	WorkspaceConditionContainerRunning WorkspaceCondition = "WorkspaceContainerRunning"
+
+	// WorkspaceConditionPodRejected is true if we detected that the pod was rejected by the node
+	WorkspaceConditionPodRejected WorkspaceCondition = "PodRejected"
+
+	// WorkspaceConditionStateWiped is true once all state has successfully been wiped by ws-daemon. This is only set if PodRejected=true, and the rejected workspace has been deleted.
+	WorkspaceConditionStateWiped WorkspaceCondition = "StateWiped"
+
+	// WorkspaceConditionForceKilledTask is true if we send a SIGKILL to the task
+	WorkspaceConditionForceKilledTask WorkspaceCondition = "ForceKilledTask"
 )
 
 func NewWorkspaceConditionDeployed() metav1.Condition {
@@ -224,6 +318,24 @@ func NewWorkspaceConditionFailed(message string) metav1.Condition {
 		Type:               string(WorkspaceConditionFailed),
 		LastTransitionTime: metav1.Now(),
 		Status:             metav1.ConditionTrue,
+		Message:            message,
+	}
+}
+
+func NewWorkspaceConditionPodRejected(message string, status metav1.ConditionStatus) metav1.Condition {
+	return metav1.Condition{
+		Type:               string(WorkspaceConditionPodRejected),
+		LastTransitionTime: metav1.Now(),
+		Status:             status,
+		Message:            message,
+	}
+}
+
+func NewWorkspaceConditionStateWiped(message string, status metav1.ConditionStatus) metav1.Condition {
+	return metav1.Condition{
+		Type:               string(WorkspaceConditionStateWiped),
+		LastTransitionTime: metav1.Now(),
+		Status:             status,
 		Message:            message,
 	}
 }
@@ -320,6 +432,30 @@ func NewWorkspaceConditionRefresh() metav1.Condition {
 	}
 }
 
+func NewWorkspaceConditionNodeDisappeared() metav1.Condition {
+	return metav1.Condition{
+		Type:               string(WorkspaceConditionNodeDisappeared),
+		LastTransitionTime: metav1.Now(),
+		Status:             metav1.ConditionTrue,
+	}
+}
+
+func NewWorkspaceConditionContainerRunning(status metav1.ConditionStatus) metav1.Condition {
+	return metav1.Condition{
+		Type:               string(WorkspaceConditionContainerRunning),
+		LastTransitionTime: metav1.Now(),
+		Status:             status,
+	}
+}
+
+func NewWorkspaceConditionForceKilledTask() metav1.Condition {
+	return metav1.Condition{
+		Type:               string(WorkspaceConditionForceKilledTask),
+		LastTransitionTime: metav1.Now(),
+		Status:             metav1.ConditionTrue,
+	}
+}
+
 // +kubebuilder:validation:Enum:=Unknown;Pending;Imagebuild;Creating;Initializing;Running;Stopping;Stopped
 type WorkspacePhase string
 
@@ -400,6 +536,38 @@ type WorkspaceList struct {
 // resource.
 func (w *Workspace) IsHeadless() bool {
 	return w.Spec.Type != WorkspaceTypeRegular
+}
+
+func (w *Workspace) IsConditionTrue(condition WorkspaceCondition) bool {
+	return wsk8s.ConditionPresentAndTrue(w.Status.Conditions, string(condition))
+}
+
+func (w *Workspace) IsConditionPresent(condition WorkspaceCondition) bool {
+	c := wsk8s.GetCondition(w.Status.Conditions, string(condition))
+	return c != nil
+}
+
+func (w *Workspace) GetConditionState(condition WorkspaceCondition) (state metav1.ConditionStatus, ok bool) {
+	cond := wsk8s.GetCondition(w.Status.Conditions, string(condition))
+	if cond == nil {
+		return "", false
+	}
+	return cond.Status, true
+}
+
+// UpsertConditionOnStatusChange calls SetCondition if the condition does not exist or it's status or message has changed.
+func (w *Workspace) UpsertConditionOnStatusChange(newCondition metav1.Condition) {
+	oldCondition := wsk8s.GetCondition(w.Status.Conditions, newCondition.Type)
+	if oldCondition != nil && oldCondition.Status == newCondition.Status && oldCondition.Message == newCondition.Message {
+		return
+	}
+	w.Status.SetCondition(newCondition)
+}
+
+// OWI produces the owner, workspace, instance log metadata from the information
+// of this workspace.
+func (w *Workspace) OWI() logrus.Fields {
+	return log.OWI(w.Spec.Ownership.Owner, w.Spec.Ownership.WorkspaceID, w.Name)
 }
 
 func init() {

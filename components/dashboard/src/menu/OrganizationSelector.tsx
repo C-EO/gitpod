@@ -8,25 +8,34 @@ import { FunctionComponent, useCallback } from "react";
 import ContextMenu, { ContextMenuEntry } from "../components/ContextMenu";
 import { OrgIcon, OrgIconProps } from "../components/org-icon/OrgIcon";
 import { useCurrentUser } from "../user-context";
-import { BillingMode } from "@gitpod/gitpod-protocol/lib/billing-mode";
-import { useUserBillingMode } from "../data/billing-mode/user-billing-mode-query";
 import { useCurrentOrg, useOrganizations } from "../data/organizations/orgs-query";
 import { useLocation } from "react-router";
-import { User } from "@gitpod/gitpod-protocol";
+import { useOrgBillingMode } from "../data/billing-mode/org-billing-mode-query";
+import { useIsOwner, useListOrganizationMembers, useHasRolePermission } from "../data/organizations/members-query";
+import { isAllowedToCreateOrganization } from "@gitpod/public-api-common/lib/user-utils";
+import { OrganizationRole } from "@gitpod/public-api/lib/gitpod/v1/organization_pb";
+import { useInstallationConfiguration } from "../data/installation/default-workspace-image-query";
+import { useFeatureFlag } from "../data/featureflag-query";
 
 export default function OrganizationSelector() {
     const user = useCurrentUser();
     const orgs = useOrganizations();
     const currentOrg = useCurrentOrg();
-    const { data: userBillingMode } = useUserBillingMode();
+    const members = useListOrganizationMembers().data ?? [];
+    const owner = useIsOwner();
+    const hasMemberPermission = useHasRolePermission(OrganizationRole.MEMBER);
+    const { data: billingMode } = useOrgBillingMode();
     const getOrgURL = useGetOrgURL();
+    const { data: installationConfig } = useInstallationConfiguration();
+    const isDedicated = !!installationConfig?.isDedicatedInstallation;
+    const isMultiOrgEnabled = useFeatureFlag("enable_multi_org");
 
     // we should have an API to ask for permissions, until then we duplicate the logic here
-    const canCreateOrgs = user && !User.isOrganizationOwned(user);
+    const canCreateOrgs = user && isAllowedToCreateOrganization(user, isDedicated, isMultiOrgEnabled);
 
-    const userFullName = user?.fullName || user?.name || "...";
+    const userFullName = user?.name || "...";
 
-    let activeOrgEntry = !currentOrg.data
+    const activeOrgEntry = !currentOrg.data
         ? {
               title: userFullName,
               customContent: <CurrentOrgEntry title={userFullName} subtitle="Personal Account" />,
@@ -39,13 +48,7 @@ export default function OrganizationSelector() {
               customContent: (
                   <CurrentOrgEntry
                       title={currentOrg.data.name}
-                      subtitle={
-                          !!currentOrg.data.members
-                              ? `${currentOrg.data.members.length} member${
-                                    currentOrg.data.members.length === 1 ? "" : "s"
-                                }`
-                              : "..."
-                      }
+                      subtitle={hasMemberPermission ? `${members.length} member${members.length === 1 ? "" : "s"}` : ""}
                   />
               ),
               active: false,
@@ -57,40 +60,61 @@ export default function OrganizationSelector() {
 
     // Show members if we have an org selected
     if (currentOrg.data) {
-        linkEntries.push({
-            title: "Members",
-            customContent: <LinkEntry>Members</LinkEntry>,
-            active: false,
-            separator: true,
-            link: "/members",
-        });
-    }
+        // collaborator can't access projects, members, usage and billing
+        if (hasMemberPermission) {
+            linkEntries.push({
+                title: "Prebuilds",
+                customContent: <LinkEntry>Prebuilds</LinkEntry>,
+                active: false,
+                separator: false,
+                link: "/prebuilds",
+            });
+            linkEntries.push({
+                title: "Members",
+                customContent: <LinkEntry>Members</LinkEntry>,
+                active: false,
+                separator: true,
+                link: "/members",
+            });
+            linkEntries.push({
+                title: "Usage",
+                customContent: <LinkEntry>Usage</LinkEntry>,
+                active: false,
+                separator: false,
+                link: "/usage",
+            });
+            // Show billing if user is an owner of current org
+            if (owner) {
+                if (billingMode?.mode === "usage-based") {
+                    linkEntries.push({
+                        title: "Billing",
+                        customContent: <LinkEntry>Billing</LinkEntry>,
+                        active: false,
+                        separator: false,
+                        link: "/billing",
+                    });
+                }
+            }
 
-    // Show usage for personal account if usage based billing enabled for user
-    const showUsageForPersonalAccount =
-        !currentOrg.data &&
-        BillingMode.showUsageBasedBilling(userBillingMode) &&
-        !user?.additionalData?.isMigratedToTeamOnlyAttribution;
+            linkEntries.push({
+                title: "Repository Settings",
+                customContent: <LinkEntry>Repository Settings</LinkEntry>,
+                active: false,
+                separator: false,
+                link: "/repositories",
+            });
 
-    if (showUsageForPersonalAccount || currentOrg.data) {
-        linkEntries.push({
-            title: "Usage",
-            customContent: <LinkEntry>Usage</LinkEntry>,
-            active: false,
-            separator: false,
-            link: "/usage",
-        });
-    }
-
-    // Show settings if user is an owner of current org
-    if (currentOrg.data && currentOrg.data.isOwner) {
-        linkEntries.push({
-            title: "Settings",
-            customContent: <LinkEntry>Settings</LinkEntry>,
-            active: false,
-            separator: false,
-            link: "/settings",
-        });
+            // Org settings is available for all members, but only owner can change them
+            // collaborator can read org setting via API so that other feature like restrict org workspace classes could work
+            // we only hide the menu from dashboard
+            linkEntries.push({
+                title: "Organization Settings",
+                customContent: <LinkEntry>Organization Settings</LinkEntry>,
+                active: false,
+                separator: false,
+                link: "/settings",
+            });
+        }
     }
 
     // Ensure only last link entry has a separator
@@ -103,42 +127,16 @@ export default function OrganizationSelector() {
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((org) => ({
             title: org.name,
-            customContent: (
-                <OrgEntry
-                    id={org.id}
-                    title={org.name}
-                    subtitle={
-                        !!org.members ? `${org.members.length} member${org.members.length === 1 ? "" : "s"}` : "..."
-                    }
-                />
-            ),
+            customContent: <OrgEntry id={org.id} title={org.name} subtitle={""} />,
             // marking as active for styles
             active: true,
             separator: true,
             link: getOrgURL(org.id),
         }));
 
-    const userMigrated = user?.additionalData?.isMigratedToTeamOnlyAttribution ?? false;
-    const showPersonalEntry = !userMigrated && !!currentOrg.data;
-
     const entries = [
         activeOrgEntry,
         ...linkEntries,
-        // If user has not been migrated, and isn't currently selected, show personal account
-        ...(showPersonalEntry
-            ? [
-                  {
-                      title: userFullName,
-                      customContent: (
-                          <OrgEntry id={user?.id ?? "self"} title={userFullName} subtitle="Personal Account" />
-                      ),
-                      // marking as active for styles
-                      active: true,
-                      separator: true,
-                      link: getOrgURL("0"),
-                  },
-              ]
-            : []),
         ...otherOrgEntries,
         ...(canCreateOrgs
             ? [
@@ -167,11 +165,11 @@ export default function OrganizationSelector() {
 
     const selectedTitle = currentOrg?.data ? currentOrg.data.name : userFullName;
     const classes =
-        "flex h-full text-base py-0 text-gray-500 bg-gray-50  dark:bg-gray-800 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 dark:border-gray-700";
+        "flex h-full text-base py-0 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700";
     return (
-        <ContextMenu customClasses="w-64 left-0" menuEntries={entries}>
+        <ContextMenu customClasses="w-64 left-0 text-left" menuEntries={entries}>
             <div className={`${classes} rounded-2xl pl-1`}>
-                <div className="py-1 pr-1 flex font-semibold whitespace-nowrap max-w-xs overflow-hidden">
+                <div className="py-1 pr-1 flex font-medium max-w-xs truncate">
                     <OrgIcon
                         id={currentOrg?.data?.id || user?.id || "empty"}
                         name={selectedTitle}
@@ -215,7 +213,7 @@ export const OrgEntry: FunctionComponent<OrgEntryProps> = ({ id, title, subtitle
         <div className="w-full text-gray-400 flex items-center">
             <OrgIcon id={id} name={title} className="mr-4" size={iconSize} />
             <div className="flex flex-col">
-                <span className="text-gray-800 dark:text-gray-300 text-base font-semibold">{title}</span>
+                <span className="text-gray-800 dark:text-gray-300 text-base font-semibold truncate w-40">{title}</span>
                 <span>{subtitle}</span>
             </div>
         </div>
@@ -230,7 +228,7 @@ const CurrentOrgEntry: FunctionComponent<CurrentOrgEntryProps> = ({ title, subti
     return (
         <div className="w-full text-gray-400 flex items-center justify-between">
             <div className="flex flex-col">
-                <span className="text-gray-800 dark:text-gray-300 text-base font-semibold">{title}</span>
+                <span className="text-gray-800 dark:text-gray-300 text-base font-semibold truncate w-40">{title}</span>
                 <span>{subtitle}</span>
             </div>
 
@@ -277,14 +275,17 @@ const useGetOrgURL = () => {
             // Default to root path when switching orgs
             let path = "/";
             let hash = "";
+            const search = new URLSearchParams();
+            search.append("org", orgID);
 
             // If we're on the new workspace page, try to maintain the location and context url
             if (/^\/new(\/$)?$/.test(location.pathname)) {
                 path = `/new`;
                 hash = location.hash;
+                search.append("autostart", "false");
             }
 
-            return `${path}?org=${encodeURIComponent(orgID)}${hash}`;
+            return `${path}?${search.toString()}${hash}`;
         },
         [location.hash, location.pathname],
     );

@@ -4,7 +4,13 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { OrganizationSettings } from "@gitpod/gitpod-protocol";
+import {
+    OnboardingSettings,
+    OrgMemberRole,
+    OrganizationSettings,
+    RoleRestrictions,
+    TimeoutSettings,
+} from "@gitpod/gitpod-protocol";
 import { Entity, Column, PrimaryColumn } from "typeorm";
 import { TypeORM } from "../typeorm";
 
@@ -17,6 +23,33 @@ export class DBOrgSettings implements OrganizationSettings {
         default: false,
     })
     workspaceSharingDisabled?: boolean;
+
+    @Column("varchar", { nullable: true })
+    defaultWorkspaceImage?: string | null;
+
+    @Column("json", { nullable: true })
+    allowedWorkspaceClasses?: string[] | null;
+
+    @Column("json", { nullable: true })
+    pinnedEditorVersions?: { [key: string]: string } | null;
+
+    @Column("json", { nullable: true })
+    restrictedEditorNames?: string[] | null;
+
+    @Column("varchar", { nullable: true })
+    defaultRole?: OrgMemberRole | undefined;
+
+    @Column("json", { nullable: true })
+    timeoutSettings?: TimeoutSettings | undefined;
+
+    @Column("json", { nullable: true })
+    roleRestrictions?: RoleRestrictions | undefined;
+
+    @Column({ type: "int", default: 0 })
+    maxParallelRunningWorkspaces: number;
+
+    @Column("json", { nullable: true })
+    onboardingSettings?: OnboardingSettings | undefined;
 
     @Column()
     deleted: boolean;

@@ -16,7 +16,7 @@ import (
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
 	dockerregistry "github.com/gitpod-io/gitpod/installer/pkg/components/docker-registry"
 	"github.com/gitpod-io/gitpod/installer/pkg/components/workspace"
-	wsmanager "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager"
+	wsmanagermk2 "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager-mk2"
 	configv1 "github.com/gitpod-io/gitpod/installer/pkg/config/v1"
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 
@@ -41,15 +41,22 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 		return nil, err
 	}
 
-	workspaceManagerAddress := fmt.Sprintf("%s:%d", wsmanager.Component, wsmanager.RPCPort)
-	_ = ctx.WithExperimental(func(ucfg *experimental.Config) error {
-		if ucfg.Workspace != nil && ucfg.Workspace.UseWsmanagerMk2 {
-			workspaceManagerAddress = fmt.Sprintf("%s:%d", common.WSManagerMk2Component, wsmanager.RPCPort)
-		}
+	baseImageRepoName := "base-images"
+	workspaceImageRepoName := "workspace-images"
 
+	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
+		if cfg.Workspace != nil {
+			if cfg.Workspace.ImageBuilderMk3.BaseImageRepositoryName != "" {
+				baseImageRepoName = cfg.Workspace.ImageBuilderMk3.BaseImageRepositoryName
+			}
+			if cfg.Workspace.ImageBuilderMk3.WorkspaceImageRepositoryName != "" {
+				workspaceImageRepoName = cfg.Workspace.ImageBuilderMk3.WorkspaceImageRepositoryName
+			}
+		}
 		return nil
 	})
 
+	workspaceManagerAddress := fmt.Sprintf("%s:%d", common.WSManagerMk2Component, wsmanagermk2.RPCPort)
 	orchestrator := config.Configuration{
 		WorkspaceManager: config.WorkspaceManagerConfig{
 			Address: workspaceManagerAddress,
@@ -61,9 +68,10 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 		},
 		PullSecret:               secretName,
 		PullSecretFile:           "/config/pull-secret/pull-secret.json",
-		BaseImageRepository:      fmt.Sprintf("%s/base-images", registryName),
+		BaseImageRepository:      fmt.Sprintf("%s/%s", registryName, baseImageRepoName),
+		WorkspaceImageRepository: fmt.Sprintf("%s/%s", registryName, workspaceImageRepoName),
 		BuilderImage:             ctx.ImageName(ctx.Config.Repository, BuilderImage, ctx.VersionManifest.Components.ImageBuilderMk3.BuilderImage.Version),
-		WorkspaceImageRepository: fmt.Sprintf("%s/workspace-images", registryName),
+		EnableAdditionalECRAuth:  ctx.Config.ContainerRegistry.EnableAdditionalECRAuth,
 	}
 
 	workspaceImage := ctx.Config.Workspace.WorkspaceImage

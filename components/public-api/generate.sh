@@ -22,12 +22,23 @@ install_dependencies
 
 lint
 
+# Format all proto files
+buf format -w
+
 # Run breaking change detector
 buf breaking --against "https://github.com/gitpod-io/gitpod.git#branch=main,subdir=components/public-api"
 
 # Remove generated files, so they are re-created
 rm -rf go/experimental
+rm -rf java/src/main/java
 
 protoc_buf_generate
 
 update_license
+
+git ls-files -- 'java/**/*.java' 'java/**/*.kt' | xargs pre-commit run trailing-whitespace --files || true
+
+# Run end-of-file-fixer
+git ls-files -- 'typescript/*.ts' | xargs pre-commit run end-of-file-fixer --files || true
+
+yarn --cwd typescript build

@@ -25,6 +25,7 @@ export class GitpodHostUrl {
     readonly url: URL;
 
     constructor(url: string) {
+        //HACK - we don't want clients to pass in a URL object, but we need to use it internally
         const urlParam = url as any;
         if (typeof urlParam === "string") {
             // public constructor
@@ -68,6 +69,7 @@ export class GitpodHostUrl {
             update.pathname = "/" + update.pathname;
         }
         const result = Object.assign(new URL(this.toString()), update);
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
         return new GitpodHostUrl(result);
     }
 
@@ -108,7 +110,7 @@ export class GitpodHostUrl {
     }
 
     asAccessControl(): GitpodHostUrl {
-        return this.with((url) => ({ pathname: "/integrations" }));
+        return this.with((url) => ({ pathname: "/user/integrations" }));
     }
 
     asSettings(): GitpodHostUrl {
@@ -120,7 +122,7 @@ export class GitpodHostUrl {
     }
 
     asStart(workspaceId = this.workspaceId): GitpodHostUrl {
-        return this.withoutWorkspacePrefix().with({
+        return this.with({
             pathname: "/start/",
             hash: "#" + workspaceId,
         });
@@ -198,6 +200,14 @@ export class GitpodHostUrl {
         return this.with((url) => ({ host: "ide." + url.host }));
     }
 
+    asPublicServices(): GitpodHostUrl {
+        const hostSegments = this.url.host.split(".");
+        if (hostSegments[0] === "services") {
+            return this;
+        }
+        return this.with((url) => ({ host: "services." + url.host }));
+    }
+
     asIDEMetrics(): GitpodHostUrl {
         let newUrl: GitpodHostUrl = this;
         const hostSegments = this.url.host.split(".");
@@ -205,5 +215,13 @@ export class GitpodHostUrl {
             newUrl = newUrl.asIDEProxy();
         }
         return newUrl.with((url) => ({ pathname: "/metrics-api" }));
+    }
+
+    asLoginWithOTS(userId: string, key: string, returnToUrl?: string) {
+        const result = this.withApi({ pathname: `/login/ots/${userId}/${key}` });
+        if (returnToUrl) {
+            return result.with({ search: `returnTo=${encodeURIComponent(returnToUrl)}` });
+        }
+        return result;
     }
 }

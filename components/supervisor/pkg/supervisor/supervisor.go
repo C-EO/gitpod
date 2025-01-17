@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -34,17 +35,22 @@ import (
 	"github.com/gorilla/websocket"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_logrus "github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus"
+	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	grpcruntime "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"github.com/prometheus/common/route"
 	"github.com/soheilhy/cmux"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 	"golang.org/x/xerrors"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gitpod-io/gitpod/common-go/analytics"
+	"github.com/gitpod-io/gitpod/common-go/experiments"
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/pprof"
 	csapi "github.com/gitpod-io/gitpod/content-service/api"
@@ -52,12 +58,12 @@ import (
 	"github.com/gitpod-io/gitpod/content-service/pkg/git"
 	gitpod "github.com/gitpod-io/gitpod/gitpod-protocol"
 	"github.com/gitpod-io/gitpod/supervisor/api"
-	"github.com/gitpod-io/gitpod/supervisor/pkg/activation"
 	"github.com/gitpod-io/gitpod/supervisor/pkg/config"
 	"github.com/gitpod-io/gitpod/supervisor/pkg/dropwriter"
 	"github.com/gitpod-io/gitpod/supervisor/pkg/metrics"
 	"github.com/gitpod-io/gitpod/supervisor/pkg/ports"
 	"github.com/gitpod-io/gitpod/supervisor/pkg/serverapi"
+	"github.com/gitpod-io/gitpod/supervisor/pkg/shared"
 	"github.com/gitpod-io/gitpod/supervisor/pkg/terminal"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -128,8 +134,9 @@ const (
 type ShutdownReason int16
 
 const (
-	ShutdownReasonSuccess        ShutdownReason = 0
-	ShutdownReasonExecutionError ShutdownReason = 1
+	ShutdownReasonSuccess              ShutdownReason = 0
+	ShutdownReasonExecutionError       ShutdownReason = 1
+	ShutdownReasonIDEReadinessTimedOut ShutdownReason = shared.ExitCodeReasonIDEReadinessTimedOut
 )
 
 type IDEKind int64
@@ -181,6 +188,17 @@ func Run(options ...RunOption) {
 		fmt.Println("supervisor makes sure your workspace/IDE keeps running smoothly.\nYou don't have to call this thing, Gitpod calls it for you.")
 		return
 	}
+
+	endpoint, host, err := cfg.GitpodAPIEndpoint()
+	if err != nil {
+		log.WithError(err).Fatal("cannot find Gitpod API endpoint")
+	}
+
+	experimentsClientOpts := []experiments.ClientOpt{}
+	if cfg.ConfigcatEnabled {
+		experimentsClientOpts = append(experimentsClientOpts, experiments.WithGitpodProxy(host))
+	}
+	exps := experiments.NewClient(experimentsClientOpts...)
 
 	// BEWARE: we can only call buildChildProcEnv once, because it might download env vars from a one-time-secret
 	//         URL, which would fail if we tried another time.
@@ -235,19 +253,15 @@ func Run(options ...RunOption) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	internalPorts := []uint32{uint32(cfg.IDEPort), uint32(cfg.APIEndpointPort), uint32(cfg.SSHPort)}
-	if cfg.DesktopIDE != nil {
+	if cfg.GetDesktopIDE() != nil {
 		internalPorts = append(internalPorts, desktopIDEPort)
 	}
 	if cfg.isDebugWorkspace() {
 		internalPorts = append(internalPorts, debugProxyPort)
 	}
 
-	endpoint, host, err := cfg.GitpodAPIEndpoint()
-	if err != nil {
-		log.WithError(err).Fatal("cannot find Gitpod API endpoint")
-	}
 	var (
-		ideReady                       = &ideReadyState{cond: sync.NewCond(&sync.Mutex{})}
+		ideReady                       = newIDEReadyState(&cfg.IDE)
 		desktopIdeReady *ideReadyState = nil
 
 		cstate        = NewInMemoryContentState(cfg.RepoRoot)
@@ -268,8 +282,8 @@ func Run(options ...RunOption) {
 		}, tokenService)
 	}
 
-	if cfg.DesktopIDE != nil {
-		desktopIdeReady = &ideReadyState{cond: sync.NewCond(&sync.Mutex{})}
+	if cfg.GetDesktopIDE() != nil {
+		desktopIdeReady = newIDEReadyState(cfg.GetDesktopIDE())
 	}
 	if !cfg.isHeadless() && !opts.RunGP && !cfg.isDebugWorkspace() {
 		go trackReadiness(ctx, telemetry, cfg, cstate, ideReady, desktopIdeReady)
@@ -322,6 +336,7 @@ func Run(options ...RunOption) {
 		}
 	}
 
+	willShutdownCtx, fireWillShutdown := context.WithCancel(ctx)
 	termMux := terminal.NewMux()
 	termMuxSrv := terminal.NewMuxTerminalService(termMux)
 	termMuxSrv.DefaultWorkdir = cfg.RepoRoot
@@ -342,10 +357,28 @@ func Run(options ...RunOption) {
 		Uid: gitpodUID,
 		Gid: gitpodGID,
 	}
+	if !cfg.isHeadless() {
+		termMuxSrv.DefaultAmbientCaps = grantCapSysPtrace(termMuxSrv.DefaultAmbientCaps)
+	}
 
 	taskManager := newTasksManager(cfg, termMuxSrv, cstate, nil, ideReady, desktopIdeReady)
 
-	willShutdownCtx, fireWillShutdown := context.WithCancel(ctx)
+	gitStatusWg := &sync.WaitGroup{}
+	gitStatusCtx, stopGitStatus := context.WithCancel(ctx)
+	if !cfg.isPrebuild() && !cfg.isHeadless() && !opts.RunGP && !cfg.isDebugWorkspace() {
+		gitStatusWg.Add(1)
+		gitStatusService := &GitStatusService{
+			cfg:           cfg,
+			experiments:   exps,
+			content:       cstate,
+			git:           &git.Client{Location: cfg.RepoRoot},
+			gitpodService: gitpodService,
+		}
+		go gitStatusService.Run(gitStatusCtx, gitStatusWg)
+	}
+
+	taskServiceWg := &sync.WaitGroup{}
+
 	apiServices := []RegisterableService{
 		&statusService{
 			willShutdownCtx: willShutdownCtx,
@@ -359,9 +392,14 @@ func Run(options ...RunOption) {
 		termMuxSrv,
 		RegistrableTokenService{Service: tokenService},
 		notificationService,
-		&InfoService{cfg: cfg, ContentState: cstate},
-		&ControlService{portsManager: portMgmt},
+		NewInfoService(cfg, cstate, gitpodService),
+		&ControlService{portsManager: portMgmt, gitpodService: gitpodService},
 		&portService{portsManager: portMgmt},
+		&taskService{
+			wg:              taskServiceWg,
+			tasksManager:    taskManager,
+			willShutdownCtx: willShutdownCtx,
+		},
 	}
 	apiServices = append(apiServices, additionalServices...)
 
@@ -371,18 +409,39 @@ func Run(options ...RunOption) {
 		installDotfiles(ctx, cfg, tokenService)
 	}
 
+	shouldShutdown, shutdownDuration := getIDENotReadyShutdownDuration(ctx, exps, host)
+	// with value true, supervisor will pass env GITPOD_WAIT_IDE_BACKEND=true when starting IDEs
+	// works with IDEs:
+	// - JB backend-plugin https://github.com/gitpod-io/gitpod/blob/main/components/ide/jetbrains/launcher/main.go#L80
+	shouldWaitBackend := shouldShutdown
 	var ideWG sync.WaitGroup
 	ideWG.Add(1)
-	go startAndWatchIDE(ctx, cfg, &cfg.IDE, &ideWG, cstate, ideReady, WebIDE, supervisorMetrics)
-	if cfg.DesktopIDE != nil {
+	go startAndWatchIDE(ctx, cfg, &cfg.IDE, &ideWG, cstate, ideReady, WebIDE, supervisorMetrics, shouldWaitBackend)
+	if cfg.GetDesktopIDE() != nil {
 		ideWG.Add(1)
-		go startAndWatchIDE(ctx, cfg, cfg.DesktopIDE, &ideWG, cstate, desktopIdeReady, DesktopIDE, supervisorMetrics)
+		go startAndWatchIDE(ctx, cfg, cfg.GetDesktopIDE(), &ideWG, cstate, desktopIdeReady, DesktopIDE, supervisorMetrics, shouldWaitBackend)
 	}
 
 	var (
 		wg       sync.WaitGroup
 		shutdown = make(chan ShutdownReason, 1)
 	)
+	go func() {
+		<-cstate.ContentReady()
+		if !shouldShutdown {
+			return
+		}
+		allReady, waitFor := waitForIde(ctx, ideReady, desktopIdeReady, shutdownDuration)
+		if !allReady {
+			log.WithField("waitFor", waitFor).WithField("duration", shutdownDuration.String()).Error("shutdown as IDEs are not ready")
+			msg := []byte(fmt.Sprintf("%s timed out to start after %.0f minutes", waitFor, shutdownDuration.Minutes()))
+			err := os.WriteFile("/dev/termination-log", msg, 0o644)
+			if err != nil {
+				log.WithError(err).Error("err while writing termination log")
+			}
+			shutdown <- ShutdownReasonIDEReadinessTimedOut
+		}
+	}()
 
 	if opts.RunGP {
 		cstate.MarkContentReady(csapi.WorkspaceInitFromOther)
@@ -394,7 +453,7 @@ func Run(options ...RunOption) {
 	}
 
 	wg.Add(1)
-	go startAPIEndpoint(ctx, cfg, &wg, apiServices, tunneledPortsService, metricsReporter, apiEndpointOpts...)
+	go startAPIEndpoint(ctx, cfg, &wg, apiServices, tunneledPortsService, metricsReporter, supervisorMetrics, topService, apiEndpointOpts...)
 
 	wg.Add(1)
 	go startSSHServer(ctx, cfg, &wg)
@@ -405,12 +464,12 @@ func Run(options ...RunOption) {
 
 	if !opts.RunGP {
 		wg.Add(1)
-		go socketActivationForDocker(ctx, &wg, termMux, cfg, telemetry)
+		go socketActivationForDocker(ctx, &wg, termMux, cfg, telemetry, notificationService, cstate)
 	}
 
 	if cfg.isHeadless() {
 		wg.Add(1)
-		go stopWhenTasksAreDone(ctx, &wg, shutdown, tasksSuccessChan)
+		go stopWhenTasksAreDone(&wg, cfg, shutdown, tasksSuccessChan)
 	} else if !opts.RunGP {
 		wg.Add(1)
 		go portMgmt.Run(ctx, &wg)
@@ -435,7 +494,7 @@ func Run(options ...RunOption) {
 
 				start := time.Now()
 				defer func() {
-					log.Debugf("unshallow of local repository took %v", time.Since(start))
+					log.WithField("duration", time.Since(start).String()).Debugf("unshallow of local repository took %v", time.Since(start))
 				}()
 
 				if !isShallowRepository(repoRoot) {
@@ -464,17 +523,63 @@ func Run(options ...RunOption) {
 
 	log.Info("received SIGTERM (or shutdown) - tearing down")
 	fireWillShutdown()
+
+	// wait for last git status to persist
+	stopGitStatus()
+	gitStatusWg.Wait()
+
+	cleanExit := waitWithTimeout(taskServiceWg, 2*time.Second)
+	if !cleanExit {
+		log.Warn("task service did not finish in time, force closing")
+	}
+
 	terminalShutdownCtx, cancelTermination := context.WithTimeout(context.Background(), cfg.GetTerminationGracePeriod())
 	defer cancelTermination()
 	cancel()
 	ideWG.Wait()
 	// terminate all terminal processes once the IDE is gone
-	err = termMux.Close(terminalShutdownCtx)
-	if err != nil {
-		log.WithError(err).Error("terminal closing failed")
-	}
+	termMux.Close(terminalShutdownCtx)
 
 	wg.Wait()
+}
+
+// Based off of https://stackoverflow.com/questions/32840687/timeout-for-waitgroup-wait/32843750#32843750
+func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	c := make(chan struct{})
+	go func() {
+		defer close(c)
+		wg.Wait()
+	}()
+	select {
+	case <-c:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func getIDENotReadyShutdownDuration(ctx context.Context, exps experiments.Client, gitpodHost string) (bool, time.Duration) {
+	if exps == nil {
+		return false, time.Hour
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return false, time.Hour
+		default:
+		}
+		value := exps.GetStringValue(ctx, "supervisor_ide_not_ready_shutdown_duration", "not_found", experiments.Attributes{GitpodHost: gitpodHost})
+		if value == "not_found" || value == "undefined" {
+			return false, time.Hour
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			log.WithField("value", value).Error("cannot parse FeatureFlag supervisor_ide_not_ready_shutdown_duration")
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		return true, duration
+	}
 }
 
 func isShallowRepository(rootDir string) bool {
@@ -760,7 +865,7 @@ var (
 	errSignalTerminated = errors.New("signal: terminated")
 )
 
-func startAndWatchIDE(ctx context.Context, cfg *Config, ideConfig *IDEConfig, wg *sync.WaitGroup, cstate *InMemoryContentState, ideReady *ideReadyState, ide IDEKind, metrics *metrics.SupervisorMetrics) {
+func startAndWatchIDE(ctx context.Context, cfg *Config, ideConfig *IDEConfig, wg *sync.WaitGroup, cstate *InMemoryContentState, ideReady *ideReadyState, ide IDEKind, metrics *metrics.SupervisorMetrics, shouldWaitBackend bool) {
 	defer wg.Done()
 	defer log.WithField("ide", ide.String()).Debug("startAndWatchIDE shutdown")
 
@@ -775,9 +880,11 @@ func startAndWatchIDE(ctx context.Context, cfg *Config, ideConfig *IDEConfig, wg
 	ideStatus := statusNeverRan
 
 	var (
-		cmd        *exec.Cmd
-		ideStopped chan struct{}
-		firstStart bool = true
+		cmd                  *exec.Cmd
+		ideStopped           chan struct{}
+		firstStart           bool = true
+		readyDurationMux     sync.Mutex
+		readyDurationHasSent bool
 	)
 supervisorLoop:
 	for {
@@ -788,13 +895,19 @@ supervisorLoop:
 		ideStopped = make(chan struct{}, 1)
 		startTime := time.Now()
 		cmd = prepareIDELaunch(cfg, ideConfig)
-		launchIDE(cfg, ideConfig, cmd, ideStopped, ideReady, &ideStatus, ide)
+		launchIDE(cfg, ideConfig, cmd, ideStopped, ideReady, &ideStatus, ide, shouldWaitBackend)
+		timerAfterMaxBucket := time.NewTimer((shared.IDEReadyDurationTotalMaxBucketSecond + 1) * time.Second)
 
 		if firstStart {
 			firstStart = false
 			go func() {
 				select {
-				case <-ideReady.Wait():
+				case <-timerAfterMaxBucket.C:
+					readyDurationMux.Lock()
+					defer readyDurationMux.Unlock()
+					if readyDurationHasSent {
+						return
+					}
 					cost := time.Since(startTime).Seconds()
 					his, err := metrics.IDEReadyDurationTotal.GetMetricWithLabelValues(ide.String())
 					if err != nil {
@@ -802,6 +915,21 @@ supervisorLoop:
 						return
 					}
 					his.Observe(cost)
+					readyDurationHasSent = true
+				case <-ideReady.Wait():
+					readyDurationMux.Lock()
+					defer readyDurationMux.Unlock()
+					if readyDurationHasSent {
+						return
+					}
+					cost := time.Since(startTime).Seconds()
+					his, err := metrics.IDEReadyDurationTotal.GetMetricWithLabelValues(ide.String())
+					if err != nil {
+						log.WithError(err).Error("cannot get metrics for IDEReadyDurationTotal")
+						return
+					}
+					his.Observe(cost)
+					readyDurationHasSent = true
 				case <-ctx.Done():
 				}
 			}()
@@ -843,7 +971,7 @@ supervisorLoop:
 	}
 }
 
-func launchIDE(cfg *Config, ideConfig *IDEConfig, cmd *exec.Cmd, ideStopped chan struct{}, ideReady *ideReadyState, s *ideStatus, ide IDEKind) {
+func launchIDE(cfg *Config, ideConfig *IDEConfig, cmd *exec.Cmd, ideStopped chan struct{}, ideReady *ideReadyState, s *ideStatus, ide IDEKind, shouldWaitBackend bool) {
 	go func() {
 		// prepareIDELaunch sets Pdeathsig, which on on Linux, will kill the
 		// child process when the thread dies, not when the process dies.
@@ -855,6 +983,11 @@ func launchIDE(cfg *Config, ideConfig *IDEConfig, cmd *exec.Cmd, ideStopped chan
 		defer runtime.UnlockOSThread()
 
 		log.Info("start launchIDE")
+		if shouldWaitBackend && ide == DesktopIDE {
+			// works with IDEs:
+			// - JB backend-plugin https://github.com/gitpod-io/gitpod/blob/main/components/ide/jetbrains/launcher/main.go#L80
+			cmd.Env = append(cmd.Env, "GITPOD_WAIT_IDE_BACKEND=true")
+		}
 		err := cmd.Start()
 		if err != nil {
 			if s == func() *ideStatus { i := statusNeverRan; return &i }() {
@@ -878,7 +1011,7 @@ func launchIDE(cfg *Config, ideConfig *IDEConfig, cmd *exec.Cmd, ideStopped chan
 
 			ideWasReady, _ := ideReady.Get()
 			if !ideWasReady {
-				log.WithField("ide", ide.String()).WithError(err).Fatal("IDE failed to start")
+				log.WithField("ide", ide.String()).WithError(err).Fatal("IDE failed before becoming ready")
 				return
 			}
 		}
@@ -906,6 +1039,8 @@ func prepareIDELaunch(cfg *Config, ideConfig *IDEConfig) *exec.Cmd {
 	// IDE and its children.
 	cmd.SysProcAttr.Setpgid = true
 	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+
+	cmd.SysProcAttr.AmbientCaps = grantCapSysPtrace(cmd.SysProcAttr.AmbientCaps)
 
 	// Here we must resist the temptation to "neaten up" the IDE output for headless builds.
 	// This would break the JSON parsing of the headless builds.
@@ -949,7 +1084,7 @@ func buildChildProcEnv(cfg *Config, envvars []string, runGP bool) []string {
 	getEnv := func(name string) string {
 		return envs[name]
 	}
-	for _, ide := range []*IDEConfig{&cfg.IDE, cfg.DesktopIDE} {
+	for _, ide := range []*IDEConfig{&cfg.IDE, cfg.GetDesktopIDE()} {
 		if ide == nil || ide.Env == nil {
 			continue
 		}
@@ -1001,9 +1136,28 @@ func buildChildProcEnv(cfg *Config, envvars []string, runGP bool) []string {
 	envs["HOME"] = "/home/gitpod"
 	envs["USER"] = "gitpod"
 
+	if cpuCount, ok := envs["GITPOD_CPU_COUNT"]; ok && cfg.IsSetJavaProcessorCount {
+		if _, exists := envs["JAVA_TOOL_OPTIONS"]; exists {
+			// check if the JAVA_TOOL_OPTIONS already contains the ActiveProcessorCount flag
+			if !strings.Contains(envs["JAVA_TOOL_OPTIONS"], "-XX:ActiveProcessorCount=") {
+				envs["JAVA_TOOL_OPTIONS"] += fmt.Sprintf(" -XX:+UseContainerSupport -XX:ActiveProcessorCount=%s", cpuCount)
+			}
+		} else {
+			envs["JAVA_TOOL_OPTIONS"] = fmt.Sprintf("-XX:+UseContainerSupport -XX:ActiveProcessorCount=%s", cpuCount)
+		}
+	}
 	// Particular Java optimisation: Java pre v10 did not gauge it's available memory correctly, and needed explicitly setting "-Xmx" for all Hotspot/openJDK VMs
-	if mem, ok := envs["GITPOD_MEMORY"]; ok {
+	if mem, ok := envs["GITPOD_MEMORY"]; ok && cfg.IsSetJavaXmx {
 		envs["JAVA_TOOL_OPTIONS"] += fmt.Sprintf(" -Xmx%sm", mem)
+	}
+
+	if _, ok := envs["HISTFILE"]; !ok {
+		envs["HISTFILE"] = "/workspace/.gitpod/.shell_history"
+		envs["PROMPT_COMMAND"] = "history -a"
+	}
+
+	if _, ok := envs["BROWSER"]; !ok {
+		envs["BROWSER"] = "/.supervisor/browser.sh"
 	}
 
 	var env, envn []string
@@ -1152,7 +1306,28 @@ func isBlacklistedEnvvar(name string) bool {
 	return false
 }
 
-func startAPIEndpoint(ctx context.Context, cfg *Config, wg *sync.WaitGroup, services []RegisterableService, tunneled *ports.TunneledPortsService, metricsReporter *metrics.GrpcMetricsReporter, opts ...grpc.ServerOption) {
+var websocketCloseErrorPattern = regexp.MustCompile(`websocket: close (\d+)`)
+
+func extractCloseErrorCode(errStr string) string {
+	matches := websocketCloseErrorPattern.FindStringSubmatch(errStr)
+	if len(matches) < 2 {
+		return "unknown"
+	}
+
+	return matches[1]
+}
+
+func startAPIEndpoint(
+	ctx context.Context,
+	cfg *Config,
+	wg *sync.WaitGroup,
+	services []RegisterableService,
+	tunneled *ports.TunneledPortsService,
+	metricsReporter *metrics.GrpcMetricsReporter,
+	supervisorMetrics *metrics.SupervisorMetrics,
+	topService *TopService,
+	opts ...grpc.ServerOption,
+) {
 	defer wg.Done()
 	defer log.Debug("startAPIEndpoint shutdown")
 
@@ -1186,6 +1361,20 @@ func startAPIEndpoint(ctx context.Context, cfg *Config, wg *sync.WaitGroup, serv
 		}
 	}
 
+	// add gprc recover, must be last, to be executed first after the rpc handler, we want upstream interceptors to have a meaningful response to work with)
+	unaryInterceptors = append(unaryInterceptors, grpc_recovery.UnaryServerInterceptor(grpc_recovery.WithRecoveryHandlerContext(
+		func(ctx context.Context, p interface{}) error {
+			log.WithField("stack", string(debug.Stack())).Errorf("[PANIC] %s", p)
+			return status.Errorf(codes.Internal, "%s", p)
+		},
+	)))
+	streamInterceptors = append(streamInterceptors, grpc_recovery.StreamServerInterceptor(grpc_recovery.WithRecoveryHandlerContext(
+		func(ctx context.Context, p interface{}) error {
+			log.WithField("stack", string(debug.Stack())).Errorf("[PANIC] %s", p)
+			return status.Errorf(codes.Internal, "%s", p)
+		},
+	)))
+
 	opts = append(opts,
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(unaryInterceptors...)),
 		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(streamInterceptors...)),
@@ -1201,7 +1390,7 @@ func startAPIEndpoint(ctx context.Context, cfg *Config, wg *sync.WaitGroup, serv
 			reg.RegisterGRPC(grpcServer)
 		}
 		if reg, ok := reg.(RegisterableRESTService); ok {
-			err := reg.RegisterREST(restMux, grpcEndpoint)
+			err := reg.RegisterREST(ctx, restMux, grpcEndpoint)
 			if err != nil {
 				log.WithError(err).Fatal("cannot register REST service")
 			}
@@ -1258,6 +1447,57 @@ func startAPIEndpoint(ctx context.Context, cfg *Config, wg *sync.WaitGroup, serv
 		}
 		tunnelOverWebSocket(tunneled, conn)
 	}))
+	routes.Handle("/_supervisor/tunnel/ssh", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		var err error
+		supervisorMetrics.SSHTunnelOpenedTotal.WithLabelValues().Inc()
+		defer func() {
+			code := "unknown"
+			if err != nil {
+				code = extractCloseErrorCode(err.Error())
+			}
+			supervisorMetrics.SSHTunnelClosedTotal.WithLabelValues(code).Inc()
+		}()
+		startTime := time.Now()
+		log := log.WithField("userAgent", r.Header.Get("user-agent")).WithField("remoteAddr", r.RemoteAddr)
+		wsConn, err := upgrader.Upgrade(rw, r, nil)
+		if err != nil {
+			log.WithError(err).Error("tunnel ssh: upgrade to the WebSocket protocol failed")
+			return
+		}
+		conn, err := gitpod.NewWebsocketConnection(ctx, wsConn, func(staleErr error) {
+			log.WithError(staleErr).Error("tunnel ssh: closing stale connection")
+		})
+		if err != nil {
+			log.WithError(err).Error("tunnel ssh: upgrade to the WebSocket protocol failed")
+			return
+		}
+
+		log.Infof("tunnel ssh: Connected from %s", conn.RemoteAddr())
+
+		conn2, err := net.Dial("tcp", net.JoinHostPort("localhost", strconv.FormatInt(int64(cfg.SSHPort), 10)))
+		if err != nil {
+			log.WithError(err).Error("tunnel ssh: dial to ssh server failed")
+			return
+		}
+
+		go io.Copy(conn, conn2)
+		_, err = io.Copy(conn2, conn)
+		if err != nil {
+			var usedCpu, usedMemory int64
+			data := topService.data
+			if data != nil && data.Cpu != nil {
+				usedCpu = data.Cpu.Used
+			}
+			if data != nil && data.Memory != nil {
+				usedMemory = data.Memory.Used
+			}
+			log.WithField("usedCpu", usedCpu).WithField("usedMemory", usedMemory).WithError(err).Error("tunnel ssh: error returned from io.copy")
+		}
+
+		conn.Close()
+		conn2.Close()
+		log.WithField("duration", time.Since(startTime).Seconds()).Infof("tunnel ssh: Disconnect from %s", conn.RemoteAddr())
+	}))
 	if cfg.DebugEnable {
 		routes.Handle("/_supervisor/debug/tunnels", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			rw.Header().Set("X-Content-Type-Options", "nosniff")
@@ -1266,13 +1506,19 @@ func startAPIEndpoint(ctx context.Context, cfg *Config, wg *sync.WaitGroup, serv
 		}))
 		routes.Handle("/_supervisor"+pprof.Path, http.StripPrefix("/_supervisor", pprof.Handler()))
 	}
-	go http.Serve(httpMux, routes)
+
+	server := &http.Server{Handler: routes}
+	go func(l net.Listener) {
+		if err := server.Serve(l); err != http.ErrServerClosed {
+			log.WithError(err).Error("API endpoint closed")
+		}
+	}(httpMux)
 
 	go m.Serve()
 
 	<-ctx.Done()
 	log.Info("shutting down API endpoint")
-	l.Close()
+	server.Shutdown(ctx)
 }
 
 func tunnelOverWebSocket(tunneled *ports.TunneledPortsService, conn *gitpod.WebsocketConnection) {
@@ -1353,15 +1599,27 @@ func tunnelOverSSH(ctx context.Context, tunneled *ports.TunneledPortsService, ne
 	<-ctx.Done()
 }
 
-func stopWhenTasksAreDone(ctx context.Context, wg *sync.WaitGroup, shutdown chan ShutdownReason, successChan <-chan taskSuccess) {
+func stopWhenTasksAreDone(wg *sync.WaitGroup, cfg *Config, shutdown chan ShutdownReason, successChan <-chan taskSuccess) {
 	defer wg.Done()
 	defer close(shutdown)
 
 	success := <-successChan
 	if success.Failed() {
+		var msg string
+		if cfg.isImageBuild() {
+			logFromFile, err := os.ReadFile("/workspace/.gitpod/bob.log")
+			debugMsg := "Debug this using `gp validate` (visit https://www.gitpod.io/docs/configure/workspaces#validate-your-gitpod-configuration) to learn more"
+			if err != nil {
+				log.WithError(err).Error("err while reading bob.log")
+				msg = fmt.Sprintf("image build failed: %s. %s", string(success), debugMsg)
+			} else {
+				msg = fmt.Sprintf("image build failed: %s. %s", string(logFromFile), debugMsg)
+			}
+		} else {
+			msg = fmt.Sprintf("headless task failed: %s", string(success))
+		}
 		// we signal task failure via kubernetes termination log
-		msg := []byte("headless task failed: " + string(success))
-		err := ioutil.WriteFile("/dev/termination-log", msg, 0o644)
+		err := os.WriteFile("/dev/termination-log", []byte(msg), 0o644)
 		if err != nil {
 			log.WithError(err).Error("err while writing termination log")
 		}
@@ -1411,19 +1669,8 @@ func startContentInit(ctx context.Context, cfg *Config, wg *sync.WaitGroup, cst 
 
 	fn := "/workspace/.gitpod/content.json"
 	fnReady := "/workspace/.gitpod/ready"
-	if _, err := os.Stat("/.workspace/.gitpod/pvc"); !os.IsNotExist(err) {
-		fn = "/.workspace/.gitpod/content.json"
-		fnReady = "/.workspace/.gitpod/ready"
-		log.Info("Detected pvc file in /.workspace folder, assuming PVC feature enabled")
-	} else if _, err := os.Stat("/.workspace/.gitpod/content.json"); !os.IsNotExist(err) {
-		// todo(pavel): remove this after gen65 has shipped
-		fn = "/.workspace/.gitpod/content.json"
-		log.Info("[deprecated] Detected content.json in /.workspace folder, assuming PVC feature enabled")
-	}
 
-	var contentFile *os.File
-
-	contentFile, err = os.Open(fn)
+	contentFile, err := os.Open(fn)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.WithError(err).Error("cannot open init descriptor")
@@ -1505,73 +1752,6 @@ func recordInitializerMetrics(path string, metrics *metrics.SupervisorMetrics) {
 
 	for _, m := range ready.Metrics {
 		metrics.InitializerHistogram.WithLabelValues(m.Type).Observe(float64(m.Size) / m.Duration.Seconds())
-	}
-}
-
-func socketActivationForDocker(ctx context.Context, wg *sync.WaitGroup, term *terminal.Mux, cfg *Config, w analytics.Writer) {
-	defer wg.Done()
-
-	fn := "/var/run/docker.sock"
-	l, err := net.Listen("unix", fn)
-	if err != nil {
-		log.WithError(err).Error("cannot provide Docker activation socket")
-		return
-	}
-
-	go func() {
-		<-ctx.Done()
-		l.Close()
-	}()
-
-	_ = os.Chown(fn, gitpodUID, gitpodGID)
-	for ctx.Err() == nil {
-		err = activation.Listen(ctx, l, func(socketFD *os.File) error {
-			defer socketFD.Close()
-			cmd := exec.Command("/usr/bin/docker-up")
-			cmd.Env = append(os.Environ(), "LISTEN_FDS=1")
-			cmd.ExtraFiles = []*os.File{socketFD}
-			alias, err := term.Start(cmd, terminal.TermOptions{
-				Annotations: map[string]string{
-					"gitpod.supervisor": "true",
-				},
-				LogToStdout: true,
-			})
-			outcome := "success"
-			if err != nil {
-				outcome = "failure"
-			}
-			w.Track(analytics.TrackMessage{
-				Identity: analytics.Identity{UserID: cfg.OwnerId},
-				Event:    "gitpod_activate_docker",
-				Properties: map[string]interface{}{
-					"instanceId":     cfg.WorkspaceInstanceID,
-					"workspaceId":    cfg.WorkspaceID,
-					"outcome":        outcome,
-					"debugWorkspace": cfg.isDebugWorkspace(),
-				},
-			})
-			if err != nil {
-				return err
-			}
-			pty, ok := term.Get(alias)
-			if !ok {
-				return errors.New("cannot find pty")
-			}
-			ptyCtx, cancel := context.WithCancel(context.Background())
-			go func(ptyCtx context.Context) {
-				select {
-				case <-ctx.Done():
-					_ = pty.Command.Process.Signal(syscall.SIGTERM)
-				case <-ptyCtx.Done():
-				}
-			}(ptyCtx)
-			_, err = pty.Wait()
-			cancel()
-			return err
-		})
-		if err != nil && !errors.Is(err, context.Canceled) && err.Error() != "signal: killed" {
-			log.WithError(err).Error("cannot provide Docker activation socket")
-		}
 	}
 }
 
@@ -1753,7 +1933,7 @@ func trackReadiness(ctx context.Context, w analytics.Writer, cfg *Config, cstate
 		<-ideReady.Wait()
 		trackFn(cfg, readinessKindIDE)
 	}()
-	if cfg.DesktopIDE != nil {
+	if cfg.GetDesktopIDE() != nil {
 		go func() {
 			<-desktopIdeReady.Wait()
 			trackFn(cfg, readinessKindDesktopIDE)
@@ -1780,24 +1960,33 @@ func handleExit(ec *int) {
 	os.Exit(exitCode)
 }
 
-func waitForIde(parent context.Context, ideReady *ideReadyState, desktopIdeReady *ideReadyState, timeout time.Duration) {
+func waitForIde(parent context.Context, ideReady *ideReadyState, desktopIdeReady *ideReadyState, timeout time.Duration) (bool, string) {
 	if ideReady == nil {
-		return
+		return true, ""
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	select {
 	case <-ctx.Done():
-		return
+		return false, ideReady.ideConfig.DisplayName
 	case <-ideReady.Wait():
 	}
 
 	if desktopIdeReady == nil {
-		return
+		return true, ""
 	}
 	select {
 	case <-ctx.Done():
-		return
+		// We assume desktop editors should have backend/server anyway
+		// "IntelliJ backend timed out to start after 5 minutes"
+		return false, desktopIdeReady.ideConfig.DisplayName + " backend"
 	case <-desktopIdeReady.Wait():
 	}
+	return true, ""
+}
+
+// We grant ptrace for IDE, terminal, ssh and their child process
+// It's make IDE attach more easier
+func grantCapSysPtrace(caps []uintptr) []uintptr {
+	return append(caps, unix.CAP_SYS_PTRACE)
 }

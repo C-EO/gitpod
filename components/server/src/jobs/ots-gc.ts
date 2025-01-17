@@ -14,12 +14,13 @@ export class OTSGarbageCollector implements Job {
     @inject(TracedOneTimeSecretDB) protected readonly oneTimeSecretDB: DBWithTracing<OneTimeSecretDB>;
 
     public name = "ots-gc";
-    public lockId = ["ots-gc"];
     public frequencyMs = 5 * 60 * 1000; // every 5 minutes
 
-    public async run(): Promise<void> {
+    public async run(): Promise<number | undefined> {
         try {
             await this.oneTimeSecretDB.trace({}).pruneExpired();
+
+            return undefined;
         } catch (err) {
             log.error("Failed to garbage collect OTS", err);
             throw err;

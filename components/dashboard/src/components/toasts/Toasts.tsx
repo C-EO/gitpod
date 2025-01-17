@@ -10,12 +10,14 @@ import { Portal } from "react-portal";
 import { ToastEntry, toastReducer } from "./reducer";
 import { Toast } from "./Toast";
 
-type ToastFnProps = string | (Pick<ToastEntry, "message"> & Partial<ToastEntry>);
+type ToastFnProps = ToastEntry["message"] | (Pick<ToastEntry, "message"> & Partial<ToastEntry>);
 
 const ToastContext = createContext<{
     toast: (toast: ToastFnProps, opts?: Partial<ToastEntry>) => void;
+    dismissToast: (id: string) => void;
 }>({
     toast: () => undefined,
+    dismissToast: () => undefined,
 });
 
 export const useToast = () => {
@@ -25,20 +27,28 @@ export const useToast = () => {
 export const ToastContextProvider: FC = ({ children }) => {
     const [toasts, dispatch] = useReducer(toastReducer, []);
 
-    const removeToast = useCallback((id) => {
+    const dismissToast = useCallback((id) => {
         dispatch({ type: "remove", id });
     }, []);
 
     const addToast = useCallback((message: ToastFnProps, opts = {}) => {
+        // detect if message arg looks like a toast object
+        // it can also be a ReactNode
+        let isToastObj = false;
+        if (message && typeof message === "object" && message.hasOwnProperty("message")) {
+            isToastObj = true;
+        }
+
         let newToast: ToastEntry = {
-            ...(typeof message === "string"
+            ...(isToastObj
                 ? {
                       id: `${Math.random()}`,
-                      message,
+                      // @ts-ignore
+                      ...message,
                   }
                 : {
                       id: `${Math.random()}`,
-                      ...message,
+                      message,
                   }),
             ...opts,
         };
@@ -46,12 +56,12 @@ export const ToastContextProvider: FC = ({ children }) => {
         dispatch({ type: "add", toast: newToast });
     }, []);
 
-    const ctxValue = useMemo(() => ({ toast: addToast }), [addToast]);
+    const ctxValue = useMemo(() => ({ toast: addToast, dismissToast }), [addToast, dismissToast]);
 
     return (
         <ToastContext.Provider value={ctxValue}>
             {children}
-            <ToastsList toasts={toasts} onRemove={removeToast} />
+            <ToastsList toasts={toasts} onRemove={dismissToast} />
         </ToastContext.Provider>
     );
 };

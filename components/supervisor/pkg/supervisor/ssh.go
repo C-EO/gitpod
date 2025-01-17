@@ -39,12 +39,24 @@ func newSSHServer(ctx context.Context, cfg *Config, envvars []string) (*sshServe
 	if err != nil {
 		return nil, xerrors.Errorf("unexpected error creating SSH dir: %w", err)
 	}
+	caPath := filepath.Join(filepath.Dir(bin), "ssh", "ca.pem")
+
+	err = ensureSSHCAFile(cfg, caPath)
+	if err != nil {
+		return nil, xerrors.Errorf("unexpected error creating SSH ca pem: %w", err)
+	}
+
+	err = ensurePrivsepDir()
+	if err != nil {
+		return nil, xerrors.Errorf("unexpected error creating privsep path: %w", err)
+	}
 
 	return &sshServer{
 		ctx:     ctx,
 		cfg:     cfg,
 		sshkey:  sshkey,
 		envvars: envvars,
+		caPath:  caPath,
 	}, nil
 }
 
@@ -54,6 +66,7 @@ type sshServer struct {
 	envvars []string
 
 	sshkey string
+	caPath string
 }
 
 // ListenAndServe listens on the TCP network address laddr and then handle packets on incoming connections.
@@ -86,6 +99,10 @@ func (s *sshServer) handleConn(ctx context.Context, conn net.Conn) {
 	if _, err := os.Stat(openssh); err != nil {
 		return
 	}
+	sshdSession := filepath.Join(filepath.Dir(bin), "ssh", "sshd-session")
+	if _, err := os.Stat(sshdSession); err != nil {
+		sshdSession = ""
+	}
 
 	var args []string
 	args = append(args,
@@ -94,7 +111,7 @@ func (s *sshServer) handleConn(ctx context.Context, conn net.Conn) {
 		"-oAllowUsers gitpod",
 		"-oPasswordAuthentication no",
 		"-oChallengeResponseAuthentication no",
-		"-oPermitRootLogin no",
+		"-oPermitRootLogin yes",
 		"-oLoginGraceTime 20",
 		"-oPrintLastLog no",
 		"-oPermitUserEnvironment yes",
@@ -103,7 +120,11 @@ func (s *sshServer) handleConn(ctx context.Context, conn net.Conn) {
 		"-oUseDNS no", // Disable DNS lookups.
 		"-oSubsystem sftp internal-sftp",
 		"-oStrictModes no", // don't care for home directory and file permissions
+		"-oTrustedUserCAKeys "+s.caPath,
 	)
+	if sshdSession != "" {
+		args = append(args, "-oSshdSessionPath "+sshdSession)
+	}
 	// can be configured with gp env LOG_LEVEL=DEBUG to see SSH sessions/channels
 	sshdLogLevel := "ERROR"
 	switch log.Log.Logger.GetLevel() {
@@ -149,6 +170,9 @@ func (s *sshServer) handleConn(ctx context.Context, conn net.Conn) {
 	cmd.Env = s.envvars
 	cmd.ExtraFiles = []*os.File{socketFD}
 	cmd.Stderr = os.Stderr
+
+	cmd.SysProcAttr.AmbientCaps = grantCapSysPtrace(cmd.SysProcAttr.AmbientCaps)
+
 	if s.cfg.WorkspaceLogRateLimit > 0 {
 		limit := int64(s.cfg.WorkspaceLogRateLimit)
 		cmd.Stderr = dropwriter.Writer(cmd.Stderr, dropwriter.NewBucket(limit*1024*3, limit*1024))
@@ -237,6 +261,30 @@ func ensureSSHDir(cfg *Config) error {
 	}
 	_ = exec.Command("chown", "-R", fmt.Sprintf("%d:%d", gitpodUID, gitpodGID), d).Run()
 
+	return nil
+}
+
+func ensurePrivsepDir() error {
+	// Privilege separation, or privsep, is method in OpenSSH by which
+	// operations that require root privilege are performed by a separate
+	// privileged monitor process.
+	// see detail: https://github.com/openssh/openssh-portable/blob/master/README.privsep
+	privsepPath := "/var/empty"
+	err := os.MkdirAll(privsepPath, 0o755)
+	if err != nil {
+		return xerrors.Errorf("cannot create privsep path: %w", err)
+	}
+	return nil
+}
+
+func ensureSSHCAFile(cfg *Config, caPath string) error {
+	if cfg.SSHGatewayCAPublicKey == "" {
+		return nil
+	}
+	err := os.WriteFile(caPath, []byte(cfg.SSHGatewayCAPublicKey), 0o644)
+	if err != nil {
+		return xerrors.Errorf("cannot write ssh ca pem: %w", err)
+	}
 	return nil
 }
 

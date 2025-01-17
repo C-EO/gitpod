@@ -4,83 +4,154 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { IDEOption, IDEOptions } from "@gitpod/gitpod-protocol/lib/ide-protocol";
-import { useCallback, useEffect, useState } from "react";
-import { getGitpodService } from "../service/service";
-import { DropDown2, DropDown2Element } from "./DropDown2";
+import { useCallback, useEffect, useMemo } from "react";
+import { Combobox, ComboboxElement, ComboboxSelectedItem } from "./podkit/combobox/Combobox";
 import Editor from "../icons/Editor.svg";
+import { AllowedWorkspaceEditor, useAllowedWorkspaceEditorsMemo } from "../data/ide-options/ide-options-query";
+import { MiddleDot } from "./typography/MiddleDot";
+import { DisableScope } from "../data/workspaces/workspace-classes-query";
+import { Link } from "react-router-dom";
+import { repositoriesRoutes } from "../repositories/repositories.routes";
 
-interface SelectIDEComponentProps {
+type Props = {
     selectedIdeOption?: string;
+    selectedConfigurationId?: string;
+    pinnedEditorVersions?: Map<string, string>;
     useLatest?: boolean;
+    disabled?: boolean;
+    loading?: boolean;
+    ignoreRestrictionScopes: DisableScope[] | undefined;
+    availableOptions?: string[];
+    hideVersions?: boolean;
+    setError?: (error?: React.ReactNode) => void;
+    setWarning?: (warning?: React.ReactNode) => void;
     onSelectionChange: (ide: string, latest: boolean) => void;
-    setError?: (error?: string) => void;
-}
+};
+export default function SelectIDEComponent({
+    selectedIdeOption,
+    selectedConfigurationId,
+    pinnedEditorVersions,
+    useLatest,
+    disabled = false,
+    loading = false,
+    ignoreRestrictionScopes,
+    availableOptions,
+    hideVersions,
+    setError,
+    setWarning,
+    onSelectionChange,
+}: Props) {
+    const {
+        data: ideOptions,
+        isLoading: ideOptionsLoading,
+        computedDefault,
+    } = useAllowedWorkspaceEditorsMemo(selectedConfigurationId, {
+        filterOutDisabled: true,
+        ignoreScope: ignoreRestrictionScopes,
+    });
 
-function filteredIdeOptions(ideOptions: IDEOptions) {
-    return IDEOptions.asArray(ideOptions).filter((x) => !x.hidden);
-}
-
-export default function SelectIDEComponent(props: SelectIDEComponentProps) {
-    const [ideOptions, setIdeOptions] = useState<IDEOptions>();
-
-    useEffect(() => {
-        getGitpodService().server.getIDEOptions().then(setIdeOptions);
-    }, []);
     const getElements = useCallback(
         (search: string) => {
             if (!ideOptions) {
                 return [];
             }
-            const options = filteredIdeOptions(ideOptions);
-            const result: DropDown2Element[] = [];
-            for (const ide of options.filter((ide) =>
+            const result: ComboboxElement[] = [];
+            for (const ide of ideOptions.filter((ide) =>
                 `${ide.label}${ide.title}${ide.notes}${ide.id}`.toLowerCase().includes(search.toLowerCase()),
             )) {
-                if (!props.useLatest) {
+                if (!useLatest) {
                     result.push({
                         id: ide.id,
-                        element: <IdeOptionElementInDropDown option={ide} useLatest={false} />,
+                        element: (
+                            <IdeOptionElementInDropDown
+                                option={ide}
+                                pinnedIdeVersion={pinnedEditorVersions?.get(ide.id)}
+                                useLatest={false}
+                                hideVersion={hideVersions}
+                            />
+                        ),
                         isSelectable: true,
                     });
                 } else if (ide.latestImage) {
                     result.push({
                         id: ide.id + "-latest",
-                        element: <IdeOptionElementInDropDown option={ide} useLatest={true} />,
+                        element: (
+                            <IdeOptionElementInDropDown option={ide} useLatest={true} hideVersion={hideVersions} />
+                        ),
                         isSelectable: true,
                     });
                 }
             }
             return result;
         },
-        [ideOptions, props.useLatest],
+        [ideOptions, useLatest, pinnedEditorVersions, hideVersions],
     );
     const internalOnSelectionChange = (id: string) => {
         const { ide, useLatest } = parseId(id);
-        props.onSelectionChange(ide, useLatest);
-        if (props.setError) {
-            props.setError(undefined);
+        onSelectionChange(ide, useLatest);
+        if (setError) {
+            setError(undefined);
         }
     };
-    const ide = props.selectedIdeOption || ideOptions?.defaultIde || "";
+    const helpMessage = useMemo(() => {
+        const repoSetting = selectedConfigurationId && repositoriesRoutes.EditorSettings(selectedConfigurationId);
+        const orgSetting = "/settings";
+        return (
+            <>
+                Please contact an admin to update{" "}
+                <Link className="underline" to={orgSetting}>
+                    organization settings
+                </Link>
+                {repoSetting && (
+                    <>
+                        {" or "}
+                        <Link className="underline" to={repoSetting}>
+                            repository settings
+                        </Link>
+                    </>
+                )}
+                .
+            </>
+        );
+    }, [selectedConfigurationId]);
+
+    const ide = selectedIdeOption || computedDefault || "";
     useEffect(() => {
-        if (!ideOptions) {
+        if (!availableOptions || loading || disabled || ideOptionsLoading) {
+            setError?.(undefined);
             return;
         }
-        const option = ideOptions.options[ide];
-        if (!option) {
-            props.setError?.(`The editor '${ide}' is not supported.`);
+        if (availableOptions.length === 0) {
+            setError?.(<>No available editors for this repository. {helpMessage}</>);
+            return;
         }
-    }, [ide, ideOptions, props]);
+        if (!availableOptions.includes(ide)) {
+            setError?.(
+                <>
+                    The editor '{ide}' is not supported. {helpMessage}
+                </>,
+            );
+        } else {
+            setError?.(undefined);
+        }
+    }, [ide, availableOptions, setError, loading, disabled, ideOptionsLoading, helpMessage]);
+
     return (
-        <DropDown2
+        <Combobox
             getElements={getElements}
             onSelectionChange={internalOnSelectionChange}
             searchPlaceholder={"Select Editor"}
-            allOptions={ide}
+            initialValue={ide}
+            disabled={disabled || ideOptionsLoading || loading}
         >
-            <IdeOptionElementSelected option={ideOptions?.options[ide]} useLatest={!!props.useLatest} />
-        </DropDown2>
+            <IdeOptionElementSelected
+                option={ideOptions.find((e) => e.id === ide)}
+                pinnedIdeVersion={pinnedEditorVersions?.get(ide)}
+                useLatest={!!useLatest}
+                loading={ideOptionsLoading || loading}
+                hideVersion={hideVersions}
+            />
+        </Combobox>
     );
 }
 
@@ -90,60 +161,77 @@ function parseId(id: string): { ide: string; useLatest: boolean } {
     return { ide, useLatest };
 }
 
-interface IdeOptionElementProps {
-    option: IDEOption | undefined;
+type IdeOptionProps = {
+    option: AllowedWorkspaceEditor | undefined;
+    pinnedIdeVersion?: string;
     useLatest: boolean;
-}
-
-function capitalize(label?: string) {
-    return label && label[0].toLocaleUpperCase() + label.slice(1);
-}
-
-function IdeOptionElementSelected({ option, useLatest }: IdeOptionElementProps): JSX.Element {
+    loading?: boolean;
+    hideVersion?: boolean;
+};
+const IdeOptionElementSelected = ({
+    option,
+    pinnedIdeVersion,
+    useLatest,
+    loading = false,
+    hideVersion = false,
+}: IdeOptionProps) => {
     let version: string | undefined, label: string | undefined, title: string;
     if (!option) {
         title = "Select Editor";
     } else {
-        version = useLatest ? option.latestImageVersion : option.imageVersion;
+        version = useLatest ? option.latestImageVersion : pinnedIdeVersion ?? option.imageVersion;
         label = option.type;
         title = option.title;
     }
 
     return (
-        <div className="flex" title={title}>
-            <div className="mx-2 my-2">
-                <img className="w-8 filter-grayscale self-center" src={Editor} alt="logo" />
-            </div>
-            <div className="flex-col ml-1 mt-1 flex-grow">
-                <div className="text-gray-700 dark:text-gray-300 font-semibold">Editor</div>
-                <div className="flex text-xs text-gray-500 dark:text-gray-400">
-                    <div className="font-semibold">{title}</div>
-                    {version && (
+        <ComboboxSelectedItem
+            icon={Editor}
+            loading={loading}
+            htmlTitle={title}
+            title={
+                <div>
+                    {title}
+                    {!hideVersion && version && (
                         <>
-                            <div className="mx-1">&middot;</div>
-                            <div>{version}</div>
+                            <MiddleDot className="text-pk-content-tertiary" />{" "}
+                            <span className="font-normal">{version}</span>{" "}
                         </>
                     )}
+                    {useLatest && !hideVersion && (
+                        <div className="ml-1 rounded-xl bg-pk-content-tertiary/10 px-2 py-1 inline text-sm font-normal">
+                            Latest
+                        </div>
+                    )}
+                </div>
+            }
+            subtitle={
+                <div className="flex gap-0.5">
+                    <div className="font-semibold">Editor</div>
                     {label && (
                         <>
-                            <div className="mx-1">&middot;</div>
-                            <div>{capitalize(label)}</div>
+                            <MiddleDot />
+                            <div className="capitalize">{label}</div>
                         </>
                     )}
-                    {useLatest && <div className="ml-2 rounded-xl bg-gray-200 dark:bg-gray-600 px-2">Latest</div>}
                 </div>
-            </div>
-        </div>
+            }
+        />
     );
-}
+};
 
-function IdeOptionElementInDropDown(p: IdeOptionElementProps): JSX.Element {
-    const { option, useLatest } = p;
+export const isJetbrains = (editor: string) => {
+    //todo(ft): find a better way to group IDEs by vendor
+    return !["code", "code-desktop", "xterm"].includes(editor); // a really hacky way to get just JetBrains IDEs
+};
+
+function IdeOptionElementInDropDown({ option, useLatest, pinnedIdeVersion, hideVersion = false }: IdeOptionProps) {
     if (!option) {
         return <></>;
     }
-    const version = useLatest ? option.latestImageVersion : option.imageVersion;
-    const label = capitalize(option.type);
+
+    const version = useLatest ? option.latestImageVersion : pinnedIdeVersion ?? option.imageVersion;
+    const label = !isJetbrains(option.id) && option.type;
 
     return (
         <div className="flex" title={option.title}>
@@ -152,19 +240,19 @@ function IdeOptionElementInDropDown(p: IdeOptionElementProps): JSX.Element {
             </div>
             <div className="flex self-center text-gray-500">
                 <div className="font-semibold text-gray-700 dark:text-gray-300">{option.title}</div>
-                {version && (
+                {!hideVersion && version && (
                     <>
-                        <div className="mx-1">&middot;</div>
-                        <div>{version}</div>
+                        <MiddleDot />
+                        <span>{version}</span>
                     </>
                 )}
                 {label && (
                     <>
-                        <div className="mx-1">&middot;</div>
-                        <div>{label}</div>
+                        <MiddleDot />
+                        <span className="capitalize">{label}</span>
                     </>
                 )}
-                {useLatest && <div className="ml-2 rounded-xl bg-gray-200 px-2">Latest</div>}
+                {useLatest && !hideVersion && <div className="ml-2 rounded-xl bg-gray-200 px-2">Latest</div>}
             </div>
         </div>
     );

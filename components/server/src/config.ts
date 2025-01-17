@@ -17,6 +17,7 @@ import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { filePathTelepresenceAware } from "@gitpod/gitpod-protocol/lib/env";
 import { WorkspaceClassesConfig } from "./workspace/workspace-classes";
 import { PrebuildRateLimiters } from "./workspace/prebuild-rate-limiter";
+import { IRateLimiterOptions } from "rate-limiter-flexible";
 
 export const Config = Symbol("Config");
 export type Config = Omit<
@@ -37,28 +38,30 @@ export type Config = Omit<
         credentialsPath: string;
     };
 
-    auth: {
-        // Public/Private key for signing authenticated sessions
-        pki: {
-            signing: {
-                id: string;
-                privateKey: string;
-                publicKey: string;
-            };
-            validating: {
-                id: string;
-                privateKey: string;
-                publicKey: string;
-            }[];
-        };
-
-        session: {
-            lifetimeSeconds: number;
-            issuer: string;
-            cookie: CookieConfig;
-        };
-    };
+    auth: AuthConfig;
 };
+
+export interface AuthConfig {
+    // Public/Private key for signing authenticated sessions
+    pki: {
+        signing: {
+            id: string;
+            privateKey: string;
+            publicKey: string;
+        };
+        validating: {
+            id: string;
+            privateKey: string;
+            publicKey: string;
+        }[];
+    };
+
+    session: {
+        lifetimeSeconds: number;
+        issuer: string;
+        cookie: CookieConfig;
+    };
+}
 
 export interface WorkspaceDefaults {
     workspaceImage: string;
@@ -81,10 +84,10 @@ export interface WorkspaceGarbageCollection {
     /** The minimal age of a workspace before it is marked as 'softDeleted' (= hidden for the user) */
     minAgeDays: number;
 
-    /** The minimal age of a prebuild (incl. workspace) before it's content is deleted (+ marked as 'softDeleted') */
+    /** The minimal age of a prebuild (incl. workspace) before its content is deleted (+ marked as 'softDeleted') */
     minAgePrebuildDays: number;
 
-    /** The minimal number of days a workspace has to stay in 'softDeleted' before it's content is deleted */
+    /** The minimal number of days a workspace has to stay in 'softDeleted' before its content is deleted */
     contentRetentionPeriodDays: number;
 
     /** The maximum amount of workspaces whose content is deleted in one go */
@@ -133,7 +136,6 @@ export interface ConfigSerialized {
 
     workspaceGarbageCollection: WorkspaceGarbageCollection;
     completeSnapshotJob?: { disabled?: boolean };
-    longRunningMigrationsJob?: { disabled?: boolean };
 
     enableLocalApp: boolean;
 
@@ -150,17 +152,10 @@ export interface ConfigSerialized {
     /** maxConcurrentPrebuildsPerRef is the maximum number of prebuilds we allow per ref type at any given time */
     maxConcurrentPrebuildsPerRef: number;
 
-    incrementalPrebuilds: {
-        repositoryPasslist: string[];
-        commitHistory: number;
-    };
-
     blockNewUsers: {
         enabled: boolean;
         passlist: string[];
     };
-
-    showSetupModal: boolean;
 
     admin: {
         credentialsPath: string;
@@ -178,8 +173,19 @@ export interface ConfigSerialized {
 
     /**
      * The configuration for the rate limiter we (mainly) use for the websocket API
+     * @deprecated used for JSON-RPC API, for gRPC use rateLimits
      */
     rateLimiter: RateLimiterConfig;
+
+    /**
+     * The configuration for the rate limiter we use for the gRPC API.
+     * As a primary means use RateLimited decorator.
+     * Only use this if you need to adjst in production, make sure to apply changes to the decorator as well.
+     * Key is of the form `<grpc_service>/<grpc_method>`
+     */
+    rateLimits?: {
+        [key: string]: IRateLimiterOptions;
+    };
 
     /**
      * The address content service clients connect to
@@ -265,6 +271,9 @@ export interface ConfigSerialized {
     redis: {
         address: string;
     };
+
+    /** true if this is a Dedicated */
+    isDedicatedInstallation: boolean;
 }
 
 export interface CookieConfig {

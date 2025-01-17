@@ -9,11 +9,9 @@ import (
 
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1"
-	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
 	dockerregistry "github.com/gitpod-io/gitpod/installer/pkg/components/docker-registry"
-	wsmanager "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager"
 	wsmanagermk2 "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager-mk2"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -57,18 +55,11 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		hashObj = append(hashObj, objs...)
 	}
 
+	//nolint:typecheck
 	configHash, err := common.ObjectHash(hashObj, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	wsmanSecret := wsmanager.TLSSecretNameClient
-	_ = ctx.WithExperimental(func(ucfg *experimental.Config) error {
-		if ucfg.Workspace != nil && ucfg.Workspace.UseWsmanagerMk2 {
-			wsmanSecret = wsmanagermk2.TLSSecretNameClient
-		}
-		return nil
-	})
 
 	volumes := []corev1.Volume{
 		{
@@ -83,7 +74,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 			Name: "wsman-tls-certs",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: wsmanSecret,
+					SecretName: wsmanagermk2.TLSSecretNameClient,
 				},
 			},
 		},

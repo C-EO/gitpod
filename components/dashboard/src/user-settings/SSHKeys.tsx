@@ -4,17 +4,21 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { useEffect, useState } from "react";
-import Modal from "../components/Modal";
+import { useCallback, useEffect, useState } from "react";
+import Modal, { ModalBody, ModalFooter, ModalHeader } from "../components/Modal";
 import Alert from "../components/Alert";
 import { Item, ItemField, ItemFieldContextMenu } from "../components/ItemsList";
 import ConfirmationModal from "../components/ConfirmationModal";
-import { SSHPublicKeyValue, UserSSHPublicKeyValue } from "@gitpod/gitpod-protocol";
-import { getGitpodService } from "../service/service";
+import { SSHPublicKeyValue } from "@gitpod/gitpod-protocol";
 import dayjs from "dayjs";
 import { PageWithSettingsSubMenu } from "./PageWithSettingsSubMenu";
 import { Heading2, Subheading } from "../components/typography/headings";
 import { EmptyMessage } from "../components/EmptyMessage";
+import { Button } from "@podkit/buttons/Button";
+import { sshClient } from "../service/public-api";
+import { SSHPublicKey } from "@gitpod/public-api/lib/gitpod/v1/ssh_pb";
+import { InputField } from "../components/forms/InputField";
+import { TextInputField } from "../components/forms/TextInputField";
 
 interface AddModalProps {
     value: SSHPublicKeyValue;
@@ -23,7 +27,7 @@ interface AddModalProps {
 }
 
 interface DeleteModalProps {
-    value: UserSSHPublicKeyValue;
+    value: SSHPublicKey;
     onConfirm: () => void;
     onClose: () => void;
 }
@@ -46,91 +50,80 @@ export function AddSSHKeyModal(props: AddModalProps) {
         const tmp = SSHPublicKeyValue.validate(value);
         if (tmp) {
             setErrorMsg(tmp);
-            return false;
+            return;
         }
         try {
-            await getGitpodService().server.addSSHPublicKey(value);
+            await sshClient.createSSHPublicKey(value);
+            props.onClose();
+            props.onSave();
         } catch (e) {
             setErrorMsg(e.message.replace("Request addSSHPublicKey failed with message: ", ""));
-            return false;
+            return;
         }
-        props.onClose();
-        props.onSave();
-        return true;
     };
 
     return (
-        <Modal
-            title="New SSH Key"
-            buttons={
-                <button className="ml-2" onClick={save}>
-                    Add SSH Key
-                </button>
-            }
-            visible={true}
-            onClose={props.onClose}
-            onEnter={save}
-        >
-            <>
+        <Modal visible onClose={props.onClose} onSubmit={save}>
+            <ModalHeader>New SSH Key</ModalHeader>
+            <ModalBody>
                 {errorMsg.length > 0 && (
                     <Alert type="error" className="mb-2">
                         {errorMsg}
                     </Alert>
                 )}
-            </>
-            <div className="text-gray-500 dark:text-gray-400 text-md">
-                Add an SSH key for secure access workspaces via SSH.{" "}
-                <a href="/docs/configure/ssh" target="gitpod-ssh-doc" className="gp-link">
-                    Learn more
-                </a>
-            </div>
-            <Alert type="info" className="mt-2">
-                SSH key are used to connect securely to workspaces.{" "}
-                <a
-                    href="https://www.gitpod.io/docs/configure/ssh#create-an-ssh-key"
-                    target="gitpod-create-ssh-key-doc"
-                    className="gp-link"
-                >
-                    Learn how to create an SSH Key
-                </a>
-            </Alert>
-            <div className="mt-2">
-                <h4>Key</h4>
-                <textarea
-                    autoFocus
-                    style={{ height: "160px" }}
-                    className="w-full resize-none"
-                    value={value.key}
-                    placeholder="Begins with 'ssh-rsa', 'ecdsa-sha2-nistp256',
+                <div className="text-gray-500 dark:text-gray-400 text-md">
+                    Add an SSH key for secure access to workspaces via SSH.
+                </div>
+                <Alert type="info" className="mt-2">
+                    SSH key are used to connect securely to workspaces.{" "}
+                    <a
+                        href="https://www.gitpod.io/docs/configure/user-settings/ssh#create-an-ssh-key"
+                        target="gitpod-create-ssh-key-doc"
+                        className="gp-link"
+                    >
+                        Learn how to create an SSH Key
+                    </a>
+                </Alert>
+                <InputField label="Key">
+                    <textarea
+                        autoFocus
+                        style={{ height: "160px" }}
+                        className="w-full resize-none"
+                        value={value.key}
+                        placeholder="Begins with 'ssh-rsa', 'ecdsa-sha2-nistp256',
                         'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521',
                         'ssh-ed25519',
                         'sk-ecdsa-sha2-nistp256@openssh.com', or
                         'sk-ssh-ed25519@openssh.com'"
-                    onChange={(v) => update({ key: v.target.value })}
-                />
-            </div>
-            <div className="mt-4">
-                <h4>Title</h4>
-                <input
-                    className="w-full"
-                    type="text"
+                        onChange={(v) => update({ key: v.target.value })}
+                    />
+                </InputField>
+
+                <TextInputField
+                    label="Title"
                     placeholder="e.g. laptop"
+                    type="text"
                     value={value.name}
-                    onChange={(v) => {
-                        update({ name: v.target.value });
-                    }}
+                    onChange={(val) => update({ name: val })}
                 />
-            </div>
+            </ModalBody>
+            <ModalFooter>
+                <Button variant="secondary" onClick={props.onClose}>
+                    Cancel
+                </Button>
+                <Button type="submit">Add SSH Key</Button>
+            </ModalFooter>
         </Modal>
     );
 }
 
 export function DeleteSSHKeyModal(props: DeleteModalProps) {
-    const confirmDelete = async () => {
-        await getGitpodService().server.deleteSSHPublicKey(props.value.id!);
+    const confirmDelete = useCallback(async () => {
+        await sshClient.deleteSSHPublicKey({ sshKeyId: props.value.id! });
         props.onConfirm();
         props.onClose();
-    };
+    }, [props]);
+
     return (
         <ConfirmationModal
             title="Delete SSH Key"
@@ -147,16 +140,14 @@ export function DeleteSSHKeyModal(props: DeleteModalProps) {
 }
 
 export default function SSHKeys() {
-    const [dataList, setDataList] = useState<UserSSHPublicKeyValue[]>([]);
+    const [dataList, setDataList] = useState<SSHPublicKey[]>([]);
     const [currentData, setCurrentData] = useState<SSHPublicKeyValue>({ name: "", key: "" });
-    const [currentDelData, setCurrentDelData] = useState<UserSSHPublicKeyValue>();
+    const [currentDelData, setCurrentDelData] = useState<SSHPublicKey>();
     const [showAddModal, setShowAddModal] = useState(false);
     const [showDelModal, setShowDelModal] = useState(false);
 
     const loadData = () => {
-        getGitpodService()
-            .server.getSSHPublicKeys()
-            .then((r) => setDataList(r));
+        sshClient.listSSHPublicKeys({}).then((r) => setDataList(r.sshKeys));
     };
 
     useEffect(() => {
@@ -169,7 +160,7 @@ export default function SSHKeys() {
         setShowDelModal(false);
     };
 
-    const deleteOne = (value: UserSSHPublicKeyValue) => {
+    const deleteOne = (value: SSHPublicKey) => {
         setCurrentDelData(value);
         setShowAddModal(false);
         setShowDelModal(true);
@@ -204,9 +195,9 @@ export default function SSHKeys() {
                 </div>
                 {dataList.length !== 0 ? (
                     <div className="mt-3 flex">
-                        <button onClick={addOne} className="ml-2">
+                        <Button onClick={addOne} className="ml-2">
                             New SSH Key
-                        </button>
+                        </Button>
                     </div>
                 ) : null}
             </div>
@@ -226,7 +217,7 @@ export default function SSHKeys() {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
                     {dataList.map((key) => {
                         return (
-                            <Item solid className="items-start">
+                            <Item key={key.id} solid className="items-start">
                                 <KeyItem sshKey={key}></KeyItem>
                                 <ItemFieldContextMenu
                                     position="start"
@@ -248,15 +239,17 @@ export default function SSHKeys() {
     );
 }
 
-function KeyItem(props: { sshKey: UserSSHPublicKeyValue }) {
+function KeyItem(props: { sshKey: SSHPublicKey }) {
     const key = props.sshKey;
     return (
         <ItemField className="flex flex-col gap-y box-border overflow-hidden">
             <p className="truncate text-gray-400 dark:text-gray-600">SHA256:{key.fingerprint}</p>
             <div className="truncate my-1 text-xl text-gray-800 dark:text-gray-100 font-semibold">{key.name}</div>
-            <p className="truncate mt-4">Added on {dayjs(key.creationTime).format("MMM D, YYYY, hh:mm A")}</p>
+            <p className="truncate mt-4">Added on {dayjs(key.creationTime!.toDate()).format("MMM D, YYYY, hh:mm A")}</p>
             {!!key.lastUsedTime && (
-                <p className="truncate">Last used on {dayjs(key.lastUsedTime).format("MMM D, YYYY, hh:mm A")}</p>
+                <p className="truncate">
+                    Last used on {dayjs(key.lastUsedTime!.toDate()).format("MMM D, YYYY, hh:mm A")}
+                </p>
             )}
         </ItemField>
     );

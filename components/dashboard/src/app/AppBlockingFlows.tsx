@@ -5,11 +5,12 @@
  */
 
 import { FC, lazy } from "react";
-import { useCheckDedicatedSetup } from "../dedicated-setup/use-check-dedicated-setup";
+import { useShowDedicatedSetup } from "../dedicated-setup/use-show-dedicated-setup";
 import { useCurrentUser } from "../user-context";
-import { MigrationPage, useShouldSeeMigrationPage } from "../whatsnew/MigrationPage";
 import { useShowUserOnboarding } from "../onboarding/use-show-user-onboarding";
-import { AppLoading } from "./AppLoading";
+import { useHistory } from "react-router";
+import { useCurrentOrg } from "../data/organizations/orgs-query";
+import { OrgNamingStep } from "../dedicated-setup/OrgNamingStep";
 
 const UserOnboarding = lazy(() => import(/* webpackPrefetch: true */ "../onboarding/UserOnboarding"));
 const DedicatedSetup = lazy(() => import(/* webpackPrefetch: true */ "../dedicated-setup/DedicatedSetup"));
@@ -17,9 +18,10 @@ const DedicatedSetup = lazy(() => import(/* webpackPrefetch: true */ "../dedicat
 // This component handles any flows that should come after we've loaded the user/orgs, but before we render the normal app chrome.
 // Since this runs before the app is rendered, we should avoid adding any lengthy async calls that would delay the app from loading.
 export const AppBlockingFlows: FC = ({ children }) => {
+    const history = useHistory();
     const user = useCurrentUser();
-    const shouldSeeMigrationPage = useShouldSeeMigrationPage();
-    const checkDedicatedSetup = useCheckDedicatedSetup();
+    const org = useCurrentOrg();
+    const showDedicatedSetup = useShowDedicatedSetup();
     const showUserOnboarding = useShowUserOnboarding();
 
     // This shouldn't happen, but if it does don't render anything yet
@@ -27,24 +29,28 @@ export const AppBlockingFlows: FC = ({ children }) => {
         return <></>;
     }
 
-    // Wait until we've loaded the onboarding state before rendering anything
-    if (checkDedicatedSetup.isLoading) {
-        return <AppLoading />;
-    }
-
-    // If orgOnlyAttribution is enabled and the user hasn't been migrated, yet, we need to show the migration page
-    if (shouldSeeMigrationPage) {
-        return <MigrationPage />;
-    }
-
-    // Handle dedicated onboarding if necessary
-    if (checkDedicatedSetup.showOnboarding) {
-        return <DedicatedSetup onComplete={() => checkDedicatedSetup.markCompleted()} />;
+    // Handle dedicated setup if necessary
+    if (showDedicatedSetup.showSetup) {
+        return (
+            <DedicatedSetup
+                onComplete={() => {
+                    showDedicatedSetup.markCompleted();
+                    // keep this here to avoid flashing a different page while we reload below
+                    history.push("/settings/git");
+                    // doing a full page reload here to avoid any lingering setup-related state issues
+                    document.location.href = "/settings/git";
+                }}
+            />
+        );
     }
 
     // New user onboarding flow
     if (showUserOnboarding) {
         return <UserOnboarding user={user} />;
+    }
+
+    if (!org.data) {
+        return <OrgNamingStep onComplete={() => {}} />;
     }
 
     return <>{children}</>;

@@ -57,15 +57,9 @@ export function ProjectsSearch() {
     useEffect(() => {
         (async () => {
             if (currentProject) {
-                if (currentProject.userId) {
-                    const owner = await getGitpodService().server.adminGetUser(currentProject.userId);
+                const owner = await getGitpodService().server.adminGetTeamById(currentProject.teamId);
+                if (owner) {
                     setCurrentProjectOwner(owner.name);
-                }
-                if (currentProject.teamId) {
-                    const owner = await getGitpodService().server.adminGetTeamById(currentProject.teamId);
-                    if (owner) {
-                        setCurrentProjectOwner(owner.name);
-                    }
                 }
             }
         })();
@@ -93,72 +87,66 @@ export function ProjectsSearch() {
     };
 
     return (
-        <>
-            <div className="app-container">
-                <div className="pt-3 mb-3 flex">
-                    <div className="flex justify-between w-full">
-                        <div className="flex relative h-10 my-auto">
-                            {searching ? (
-                                <span className="filter-grayscale absolute top-3 left-3">
-                                    <SpinnerLoader small={true} />
-                                </span>
-                            ) : (
-                                <img
-                                    src={searchIcon}
-                                    title="Search"
-                                    className="filter-grayscale absolute top-3 left-3"
-                                    alt="search icon"
-                                />
-                            )}
-                            <input
-                                className="w-64 pl-9 border-0"
-                                type="search"
-                                placeholder="Search Projects"
-                                onKeyDown={(k) => k.key === "Enter" && search()}
-                                onChange={(v) => {
-                                    setSearchTerm(v.target.value.trim());
-                                }}
+        <div className="app-container">
+            <div className="pt-3 mb-3 flex">
+                <div className="flex justify-between w-full">
+                    <div className="flex relative h-10 my-auto">
+                        {searching ? (
+                            <span className="filter-grayscale absolute top-3 left-3">
+                                <SpinnerLoader small={true} />
+                            </span>
+                        ) : (
+                            <img
+                                src={searchIcon}
+                                title="Search"
+                                className="filter-grayscale absolute top-3 left-3"
+                                alt="search icon"
                             />
-                        </div>
+                        )}
+                        <input
+                            className="w-64 pl-9 border-0"
+                            type="search"
+                            placeholder="Search Projects"
+                            onKeyDown={(k) => k.key === "Enter" && search()}
+                            onChange={(v) => {
+                                setSearchTerm(v.target.value.trim());
+                            }}
+                        />
                     </div>
                 </div>
-                <div className="flex flex-col space-y-2">
-                    <div className="px-6 py-3 flex justify-between text-sm text-gray-400 border-t border-b border-gray-200 dark:border-gray-800 mb-2">
-                        <div className="w-4/12">Name</div>
-                        <div className="w-6/12">Clone URL</div>
-                        <div className="w-2/12">Created</div>
-                    </div>
-                    {searchResult.rows.map((project) => (
-                        <ProjectResultItem project={project} />
-                    ))}
-                </div>
-                <Pagination
-                    currentPage={currentPage}
-                    setPage={search}
-                    totalNumberOfPages={Math.ceil(searchResult.total / pageLength)}
-                />
             </div>
-        </>
+            <div className="flex flex-col space-y-2">
+                <div className="px-6 py-3 flex justify-between text-sm text-gray-400 border-t border-b border-gray-200 dark:border-gray-800 mb-2">
+                    <div className="w-4/12">Name</div>
+                    <div className="w-6/12">Clone URL</div>
+                    <div className="w-2/12">Created</div>
+                </div>
+                {searchResult.rows.map((project) => (
+                    <ProjectResultItem project={project} />
+                ))}
+            </div>
+            <Pagination
+                currentPage={currentPage}
+                setPage={search}
+                totalNumberOfPages={Math.ceil(searchResult.total / pageLength)}
+            />
+        </div>
     );
 
-    function ProjectResultItem(p: { project: Project }) {
+    function ProjectResultItem({ project }: { project: Project }) {
         return (
-            <Link
-                key={"pr-" + p.project.name}
-                to={"/admin/projects/" + p.project.id}
-                data-analytics='{"button_type":"sidebar_menu"}'
-            >
-                <div className="rounded-xl whitespace-nowrap flex py-6 px-6 w-full justify-between hover:bg-gray-100 dark:hover:bg-gray-800 focus:bg-gitpod-kumquat-light group">
+            <Link key={project.id} to={`/admin/projects/${project.id}`} data-analytics='{"button_type":"sidebar_menu"}'>
+                <div className="rounded-xl whitespace-nowrap flex py-6 px-6 w-full justify-between hover:bg-gray-100 dark:hover:bg-gray-800 focus:bg-kumquat-light group">
                     <div className="flex flex-col w-4/12 truncate">
-                        <div className="font-medium text-gray-800 dark:text-gray-100 truncate">{p.project.name}</div>
+                        <div className="font-medium text-gray-800 dark:text-gray-100 truncate">{project.name}</div>
                     </div>
                     <div className="flex flex-col w-6/12 truncate">
-                        <div className="text-gray-500 dark:text-gray-100 truncate">{p.project.cloneUrl}</div>
+                        <div className="text-gray-500 dark:text-gray-100 truncate">{project.cloneUrl}</div>
                     </div>
                     <div className="flex w-2/12 self-center">
-                        <Tooltip content={dayjs(p.project.creationTime).format("MMM D, YYYY")}>
+                        <Tooltip content={dayjs(project.creationTime).format("MMM D, YYYY")}>
                             <div className="text-sm w-full text-gray-400 truncate">
-                                {dayjs(p.project.creationTime).fromNow()}
+                                {dayjs(project.creationTime).fromNow()}
                             </div>
                         </Tooltip>
                     </div>

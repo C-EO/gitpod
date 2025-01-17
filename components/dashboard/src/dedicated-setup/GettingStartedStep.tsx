@@ -5,23 +5,25 @@
  */
 
 import { FC } from "react";
-import { Button } from "../components/Button";
+import { Button } from "@podkit/buttons/Button";
 import { Heading1, Subheading } from "../components/typography/headings";
 import { SetupLayout } from "./SetupLayout";
 
 type Props = {
     onComplete: () => void;
+    progressCurrent?: number;
+    progressTotal?: number;
 };
-export const GettingStartedStep: FC<Props> = ({ onComplete }) => {
+export const GettingStartedStep: FC<Props> = ({ onComplete, progressCurrent, progressTotal }) => {
     return (
-        <SetupLayout>
+        <SetupLayout progressCurrent={progressCurrent} progressTotal={progressTotal}>
             <Heading1>Let's get started</Heading1>
             <Subheading>
                 Spin up fresh cloud development environments for each task, fully automated, in seconds.
             </Subheading>
 
             <div className="mt-6">
-                <Button size="block" onClick={onComplete}>
+                <Button className="w-full" onClick={onComplete}>
                     Get Started
                 </Button>
             </div>

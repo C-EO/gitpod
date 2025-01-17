@@ -32,8 +32,6 @@ import (
 func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 	var fsshift wsdapi.FSShiftMethod
 	switch ctx.Config.Workspace.Runtime.FSShiftMethod {
-	case config.FSShiftFuseFS:
-		fsshift = wsdapi.FSShiftMethod_FUSE
 	case config.FSShiftShiftFS:
 		fsshift = wsdapi.FSShiftMethod_SHIFTFS
 	default:
@@ -104,8 +102,6 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 
 		procLimit = ucfg.Workspace.ProcLimit
 
-		wscontroller.Enabled = ucfg.Workspace.UseWsmanagerMk2
-		wscontroller.WorkingAreaSuffix = "-mk2"
 		wscontroller.MaxConcurrentReconciles = 15
 
 		if ucfg.Workspace.WorkspaceCIDR != "" {
@@ -117,6 +113,7 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 
 	wsdcfg := wsdconfig.Config{
 		Daemon: daemon.Config{
+			RegistryFacadeHost: fmt.Sprintf("reg.%s:%d", ctx.Config.Domain, common.RegistryFacadeServicePort),
 			Runtime: daemon.RuntimeConfig{
 				KubernetesNamespace: ctx.Namespace,
 				SecretsNamespace:    common.WorkspaceSecretsNamespace,
@@ -133,8 +130,8 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 				WorkspaceCIDR: workspaceCIDR,
 			},
 			Content: content.Config{
-				WorkingArea:     "/mnt/workingarea",
-				WorkingAreaNode: HostWorkingArea,
+				WorkingArea:     ContainerWorkingAreaMk2,
+				WorkingAreaNode: HostWorkingAreaMk2,
 				TmpDir:          "/tmp",
 				UserNamespaces: content.UserNamespacesConfig{
 					FSShift: content.FSShiftMethod(fsshift),
@@ -168,7 +165,7 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 				Enabled:  true,
 				Interval: util.Duration(5 * time.Minute),
 				Locations: []diskguard.LocationConfig{{
-					Path:          "/mnt/workingarea",
+					Path:          ContainerWorkingAreaMk2,
 					MinBytesAvail: 21474836480,
 				}},
 			},

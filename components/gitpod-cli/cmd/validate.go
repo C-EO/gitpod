@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor"
@@ -23,6 +25,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/xerrors"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/gitpod-io/gitpod/supervisor/api"
 	prefixed "github.com/x-cray/logrus-prefixed-formatter"
@@ -86,7 +90,14 @@ func runRebuild(ctx context.Context, supervisorClient *supervisor.SupervisorClie
 	var dockerContext string
 	switch img := gitpodConfig.Image.(type) {
 	case nil:
-		image = "gitpod/workspace-full:latest"
+		image, err = getDefaultWorkspaceImage(ctx, wsInfo)
+		if err != nil {
+			return err
+		}
+		if image == "" {
+			image = "gitpod/workspace-full:latest"
+		}
+		fmt.Println("Using default workspace image:", image)
 	case string:
 		image = img
 	case map[interface{}]interface{}:
@@ -229,7 +240,7 @@ func runRebuild(ctx context.Context, supervisorClient *supervisor.SupervisorClie
 	serverLog := logrus.NewEntry(logrus.New())
 	serverLog.Logger.SetLevel(logLevel)
 	setLoggerFormatter(serverLog.Logger)
-	workspaceEnvs, err := getWorkspaceEnvs(ctx, &connectToServerOptions{supervisorClient, wsInfo, serverLog})
+	workspaceEnvs, err := getWorkspaceEnvs(ctx, &connectToServerOptions{supervisorClient, wsInfo, serverLog, envScopeRepo})
 	if err != nil {
 		return err
 	}
@@ -240,6 +251,9 @@ func runRebuild(ctx context.Context, supervisorClient *supervisor.SupervisorClie
 	}
 	for _, env := range validateOpts.GitpodEnvs {
 		envs += env + "\n"
+	}
+	if validateOpts.Headless {
+		envs += "GITPOD_HEADLESS=true\n"
 	}
 	for _, env := range workspaceEnvs {
 		envs += fmt.Sprintf("%s=%s\n", env.Name, env.Value)
@@ -356,15 +370,26 @@ func runRebuild(ctx context.Context, supervisorClient *supervisor.SupervisorClie
 		return err
 	}
 
-	go func() {
-		debugSupervisor.WaitForIDEReady(ctx)
-		if ctx.Err() != nil {
-			return
-		}
+	if validateOpts.Headless {
+		go func() {
+			tasks, ok := waitForAllTasksToOpen(ctx, debugSupervisor, runLog)
+			if !ok {
+				return
+			}
+			for _, task := range tasks {
+				go pipeTask(ctx, task, debugSupervisor, runLog)
+			}
+		}()
+	} else {
+		go func() {
+			debugSupervisor.WaitForIDEReady(ctx)
+			if ctx.Err() != nil {
+				return
+			}
 
-		ssh := "ssh 'debug-" + wsInfo.WorkspaceId + "@" + workspaceUrl.Host + ".ssh." + wsInfo.WorkspaceClusterHost + "'"
-		sep := strings.Repeat("=", len(ssh))
-		runLog.Infof(`The workspace is UP!
+			ssh := "ssh 'debug-" + wsInfo.WorkspaceId + "@" + workspaceUrl.Host + ".ssh." + wsInfo.WorkspaceClusterHost + "'"
+			sep := strings.Repeat("=", len(ssh))
+			runLog.Infof(`The workspace is UP!
 %s
 
 Open in Browser at:
@@ -374,11 +399,12 @@ Connect using SSH keys (https://gitpod.io/keys):
 %s
 
 %s`, sep, workspaceUrl, ssh, sep)
-		err := openWindow(ctx, workspaceUrl.String())
-		if err != nil && ctx.Err() == nil {
-			log.WithError(err).Error("failed to open window")
-		}
-	}()
+			err := openWindow(ctx, workspaceUrl.String())
+			if err != nil && ctx.Err() == nil {
+				log.WithError(err).Error("failed to open window")
+			}
+		}()
+	}
 
 	pipeLogs := func(input io.Reader, ideLevel logrus.Level) {
 		reader := bufio.NewReader(input)
@@ -487,11 +513,146 @@ func openWindow(ctx context.Context, workspaceUrl string) error {
 	return gpCmd.Run()
 }
 
+func waitForAllTasksToOpen(ctx context.Context, supervisor *supervisor.SupervisorClient, runLog *logrus.Entry) (tasks []*api.TaskStatus, allTasksOpened bool) {
+	for !allTasksOpened {
+		time.Sleep(1 * time.Second)
+		if ctx.Err() != nil {
+			return
+		}
+		listener, err := supervisor.Status.TasksStatus(ctx, &api.TasksStatusRequest{
+			Observe: true,
+		})
+		if err != nil {
+			continue
+		}
+		tasks, allTasksOpened = checkAllTasksOpened(ctx, listener, runLog)
+	}
+	return
+}
+
+func checkAllTasksOpened(ctx context.Context, listener api.StatusService_TasksStatusClient, runLog *logrus.Entry) (tasks []*api.TaskStatus, allTasksOpened bool) {
+	for !allTasksOpened {
+		resp, err := listener.Recv()
+		if err != nil {
+			return
+		}
+		tasks = resp.GetTasks()
+		allTasksOpened = areTasksOpened(tasks)
+	}
+	return
+}
+
+func areTasksOpened(tasks []*api.TaskStatus) bool {
+	for _, task := range tasks {
+		if task.State == api.TaskState_opening {
+			return false
+		}
+	}
+	return true
+}
+
+func pipeTask(ctx context.Context, task *api.TaskStatus, supervisor *supervisor.SupervisorClient, runLog *logrus.Entry) {
+	for {
+		err := listenTerminal(ctx, task, supervisor, runLog)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		status, ok := status.FromError(err)
+		if ok && status.Code() == codes.NotFound {
+			return
+		}
+		runLog.WithError(err).Errorf("%s: failed to listen, retrying...", task.Presentation.Name)
+		time.Sleep(1 * time.Second)
+	}
+}
+
+// TerminalReader is an interface for anything that can receive terminal data (this is abstracted for use in testing)
+type TerminalReader interface {
+	Recv() ([]byte, error)
+}
+
+type LinePrinter func(string)
+
+// processTerminalOutput reads from a TerminalReader, processes the output, and calls the provided LinePrinter for each complete line.
+// It handles UTF-8 decoding of characters split across chunks and control characters (\n \r \b).
+func processTerminalOutput(reader TerminalReader, printLine LinePrinter) error {
+	var buffer, line bytes.Buffer
+
+	flushLine := func() {
+		if line.Len() > 0 {
+			printLine(line.String())
+			line.Reset()
+		}
+	}
+
+	for {
+		data, err := reader.Recv()
+		if err != nil {
+			if err == io.EOF {
+				flushLine()
+				return nil
+			}
+			return err
+		}
+
+		buffer.Write(data)
+
+		for {
+			r, size := utf8.DecodeRune(buffer.Bytes())
+			if r == utf8.RuneError && size == 0 {
+				break // incomplete character at the end
+			}
+
+			char := buffer.Next(size)
+
+			switch r {
+			case '\r':
+				flushLine()
+			case '\n':
+				flushLine()
+			case '\b':
+				if line.Len() > 0 {
+					line.Truncate(line.Len() - 1)
+				}
+			default:
+				line.Write(char)
+			}
+		}
+	}
+}
+
+func listenTerminal(ctx context.Context, task *api.TaskStatus, supervisor *supervisor.SupervisorClient, runLog *logrus.Entry) error {
+	listen, err := supervisor.Terminal.Listen(ctx, &api.ListenTerminalRequest{Alias: task.Terminal})
+	if err != nil {
+		return err
+	}
+
+	terminalReader := &TerminalReaderAdapter{listen}
+	printLine := func(line string) {
+		runLog.Infof("%s: %s", task.Presentation.Name, line)
+	}
+
+	return processTerminalOutput(terminalReader, printLine)
+}
+
+type TerminalReaderAdapter struct {
+	client api.TerminalService_ListenClient
+}
+
+func (t *TerminalReaderAdapter) Recv() ([]byte, error) {
+	resp, err := t.client.Recv()
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetData(), nil
+}
+
 var validateOpts struct {
 	WorkspaceFolder string
 	LogLevel        string
 	From            string
 	Prebuild        bool
+	Headless        bool
 
 	// internal
 	GitpodEnvs []string
@@ -541,9 +702,11 @@ func init() {
 		cmd.PersistentFlags().StringArrayVarP(&validateOpts.GitpodEnvs, "gitpod-env", "", nil, "")
 		cmd.PersistentFlags().StringVarP(&validateOpts.WorkspaceFolder, "workspace-folder", "w", workspaceFolder, "Path to the workspace folder.")
 		cmd.PersistentFlags().StringVarP(&validateOpts.From, "from", "", "", "Starts from 'prebuild' or 'snapshot'.")
+		cmd.PersistentFlags().BoolVarP(&validateOpts.Headless, "headless", "", false, "Starts in headless mode.")
 		_ = cmd.PersistentFlags().MarkHidden("gitpod-env")
 		_ = cmd.PersistentFlags().MarkHidden("workspace-folder")
 		_ = cmd.PersistentFlags().MarkHidden("from")
+		_ = cmd.PersistentFlags().MarkHidden("headless")
 	}
 
 	setFlags(validateCmd)

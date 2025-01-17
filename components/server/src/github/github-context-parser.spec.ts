@@ -10,7 +10,7 @@ if (typeof (Symbol as any).asyncIterator === "undefined") {
 }
 import "reflect-metadata";
 
-import { suite, test, timeout, retries } from "mocha-typescript";
+import { suite, test, timeout, retries, skip } from "@testdeck/mocha";
 import * as chai from "chai";
 const expect = chai.expect;
 
@@ -25,9 +25,9 @@ import { AuthProviderParams } from "../auth/auth-provider";
 import { TokenProvider } from "../user/token-provider";
 import { GitHubTokenHelper } from "./github-token-helper";
 import { HostContextProvider } from "../auth/host-context-provider";
-import { skipIfEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
+import { ifEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
 
-@suite(timeout(10000), retries(2), skipIfEnvVarNotSet("GITPOD_TEST_TOKEN_GITHUB"))
+@suite(timeout(10000), retries(2), skip(ifEnvVarNotSet("GITPOD_TEST_TOKEN_GITHUB")))
 class TestGithubContextParser {
     protected parser: GithubContextParser;
     protected user: User;
@@ -87,11 +87,12 @@ class TestGithubContextParser {
 
     static readonly BLO_BLA_ERROR_DATA = {
         host: "github.com",
-        lastUpdate: undefined,
+        lastUpdate: "",
         owner: "blo",
         repoName: "bla",
         userIsOwner: false,
         userScopes: ["user:email", "public_repo", "repo"],
+        errorMessage: "Could not resolve to a Repository with the name 'blo/bla'.",
     };
 
     protected getTestBranches(): BranchRef[] {
@@ -180,12 +181,12 @@ class TestGithubContextParser {
         const result = await this.parser.handle(
             {},
             this.user,
-            "https://github.com/eclipse-theia/theia/tree/master/LICENSE",
+            "https://github.com/eclipse-theia/theia/tree/master/LICENSE-EPL",
         );
         expect(result).to.deep.include({
             ref: "master",
             refType: "branch",
-            path: "LICENSE",
+            path: "LICENSE-EPL",
             isFile: true,
             repository: {
                 host: "github.com",

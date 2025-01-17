@@ -52,7 +52,9 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 				SecretName: ctx.Config.Certificate.Name,
 			},
 		},
-	}}
+	},
+		common.CAVolume(),
+	}
 
 	volumeMounts := []corev1.VolumeMount{{
 		Name:      "vhosts",
@@ -60,7 +62,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 	}, {
 		Name:      "config-certificates",
 		MountPath: "/etc/caddy/certificates",
-	}}
+	},
+		common.CAVolumeMount()}
 
 	if pointer.BoolDeref(ctx.Config.ContainerRegistry.InCluster, false) {
 		volumes = append(volumes, corev1.Volume{
@@ -93,6 +96,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		}
 	}
 
+	//nolint:typecheck
 	configHash, err := common.ObjectHash(hashObj, nil)
 	if err != nil {
 		return nil, err
@@ -101,12 +105,14 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 	var frontendDevEnabled bool
 	var trustedSegmentKey string
 	var untrustedSegmentKey string
+	var segmentEndpoint string
 	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
 		if cfg.WebApp != nil && cfg.WebApp.ProxyConfig != nil {
 			frontendDevEnabled = cfg.WebApp.ProxyConfig.FrontendDevEnabled
 			if cfg.WebApp.ProxyConfig.AnalyticsPlugin != nil {
 				trustedSegmentKey = cfg.WebApp.ProxyConfig.AnalyticsPlugin.TrustedSegmentKey
 				untrustedSegmentKey = cfg.WebApp.ProxyConfig.AnalyticsPlugin.UntrustedSegmentKey
+				segmentEndpoint = cfg.WebApp.ProxyConfig.AnalyticsPlugin.SegmentEndpoint
 			}
 		}
 		if cfg.WebApp != nil && cfg.WebApp.ProxyConfig != nil && cfg.WebApp.ProxyConfig.Configcat != nil && cfg.WebApp.ProxyConfig.Configcat.FromConfigMap != "" {
@@ -236,6 +242,9 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 							}, prometheusPort, {
 								ContainerPort: ContainerAnalyticsPort,
 								Name:          ContainerAnalyticsName,
+							}, {
+								ContainerPort: ContainerConfigcatPort,
+								Name:          ContainerConfigcatName,
 							}},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged:               pointer.Bool(false),
@@ -273,6 +282,9 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 								}, {
 									Name:  "ANALYTICS_PLUGIN_UNTRUSTED_SEGMENT_KEY",
 									Value: untrustedSegmentKey,
+								}, {
+									Name:  "ANALYTICS_PLUGIN_SEGMENT_ENDPOINT",
+									Value: segmentEndpoint,
 								}},
 							)),
 						}},

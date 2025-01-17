@@ -68,13 +68,9 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 				},
 			},
 			Templates: templatesCfg,
-			PVC: config.PVCConfiguration{
-				Size:          ctx.Config.Workspace.PVC.Size,
-				StorageClass:  ctx.Config.Workspace.PVC.StorageClass,
-				SnapshotClass: ctx.Config.Workspace.PVC.SnapshotClass,
-			},
 		},
 	}
+	var preferredWorkspaceClass string
 
 	installationShortNameSuffix := ""
 	if ctx.Config.Metadata.InstallationShortname != "" && ctx.Config.Metadata.InstallationShortname != configv1.InstallationShortNameOldDefault {
@@ -82,12 +78,11 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 	}
 
 	var schedulerName string
-	var experimentalMode bool
 	gitpodHostURL := "https://" + ctx.Config.Domain
 	workspaceClusterHost := fmt.Sprintf("ws%s.%s", installationShortNameSuffix, ctx.Config.Domain)
 	workspaceURLTemplate := fmt.Sprintf("https://{{ .Prefix }}.ws%s.%s", installationShortNameSuffix, ctx.Config.Domain)
 	workspacePortURLTemplate := fmt.Sprintf("https://{{ .WorkspacePort }}-{{ .Prefix }}.ws%s.%s", installationShortNameSuffix, ctx.Config.Domain)
-	hostWorkingArea := wsdaemon.HostWorkingArea
+	hostWorkingArea := wsdaemon.HostWorkingAreaMk2
 
 	rateLimits := map[string]grpc.RateLimit{}
 
@@ -106,7 +101,8 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 				return err
 			}
 			classes[k] = &config.WorkspaceClass{
-				Name: c.Name,
+				Name:        c.Name,
+				Description: c.Description,
 				Container: config.ContainerConfiguration{
 					Requests: &config.ResourceRequestConfiguration{
 						CPU:              quantityString(c.Resources.Requests, corev1.ResourceCPU),
@@ -124,7 +120,6 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 					},
 				},
 				Templates: tplsCfg,
-				PVC:       config.PVCConfiguration(c.PVC),
 			}
 			for tmpl_n, tmpl_v := range ctpls {
 				if _, ok := tpls[tmpl_n]; ok {
@@ -133,6 +128,15 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 				tpls[tmpl_n] = tmpl_v
 			}
 		}
+		preferredWorkspaceClass = ucfg.Workspace.PreferredWorkspaceClass
+		if preferredWorkspaceClass == "" {
+			// if no preferred workspace class is set, use a random one (maps have no order, there is no "first")
+			for _, k := range ucfg.Workspace.WorkspaceClasses {
+				preferredWorkspaceClass = k.Name
+				break
+			}
+		}
+
 		schedulerName = ucfg.Workspace.SchedulerName
 		if ucfg.Workspace.HostURL != "" {
 			gitpodHostURL = ucfg.Workspace.HostURL
@@ -147,11 +151,6 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 			workspacePortURLTemplate = ucfg.Workspace.WorkspacePortURLTemplate
 		}
 		rateLimits = ucfg.Workspace.WSManagerRateLimits
-
-		if ucfg.Workspace.UseWsmanagerMk2 {
-			hostWorkingArea = wsdaemon.HostWorkingAreaMk2
-			experimentalMode = ucfg.Workspace.UseMk2ExperimentalMode
-		}
 
 		return nil
 	})
@@ -197,10 +196,11 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 					PrivateKey:  "/ws-daemon-tls-certs/tls.key",
 				},
 			},
-			WorkspaceClasses:     classes,
-			HeartbeatInterval:    util.Duration(30 * time.Second),
-			GitpodHostURL:        gitpodHostURL,
-			WorkspaceClusterHost: workspaceClusterHost,
+			WorkspaceClasses:        classes,
+			PreferredWorkspaceClass: preferredWorkspaceClass,
+			HeartbeatInterval:       util.Duration(30 * time.Second),
+			GitpodHostURL:           gitpodHostURL,
+			WorkspaceClusterHost:    workspaceClusterHost,
 			InitProbe: config.InitProbeConfiguration{
 				Timeout: (1 * time.Second).String(),
 			},
@@ -223,7 +223,6 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 			RegistryFacadeHost:               fmt.Sprintf("reg.%s:%d", ctx.Config.Domain, common.RegistryFacadeServicePort),
 			WorkspaceMaxConcurrentReconciles: 25,
 			TimeoutMaxConcurrentReconciles:   15,
-			ExperimentalMode:                 experimentalMode,
 		},
 		Content: struct {
 			Storage storageconfig.StorageConfig `json:"storage"`
@@ -271,20 +270,17 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 		}{Addr: fmt.Sprintf(":%d", HealthPort)},
 	}
 
+	if ctx.Config.CustomCACert != nil {
+		wsmcfg.Manager.EnableCustomSSLCertificate = true
+	}
+
+	if ctx.Config.SSHGatewayCAKey != nil {
+		wsmcfg.Manager.SSHGatewayCAPublicKeyFile = "/mnt/ca-key/ca.pem"
+	}
+
 	fc, err := common.ToJSONString(wsmcfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal ws-manager config: %w", err)
-	}
-
-	// Add label to maintenance ConfigMap that ws-manager-mk2 can filter the ConfigMap watch on.
-	maintenanceLabels := common.DefaultLabels(Component)
-	maintenanceLabels[LabelMaintenanceConfig] = "true"
-	maintenanceCfg := config.MaintenanceConfig{
-		EnabledUntil: nil,
-	}
-	mc, err := common.ToJSONString(maintenanceCfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal ws-manager maintenance config: %w", err)
 	}
 
 	res := []runtime.Object{
@@ -308,17 +304,6 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 				Labels:    common.DefaultLabels(Component),
 			},
 			Data: tpls,
-		},
-		&corev1.ConfigMap{
-			TypeMeta: common.TypeMetaConfigmap,
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-maintenance-mode", Component),
-				Namespace: ctx.Namespace,
-				Labels:    maintenanceLabels,
-			},
-			Data: map[string]string{
-				"config.json": string(mc),
-			},
 		},
 	}
 	return res, nil

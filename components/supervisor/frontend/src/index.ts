@@ -63,6 +63,7 @@ IDEWebSocket.install();
 const ideService = IDEFrontendService.create();
 const loadingIDE = new Promise((resolve) => window.addEventListener("DOMContentLoaded", resolve, { once: true }));
 const toStop = new DisposableCollection();
+let willRedirect = false;
 
 document.body.style.visibility = "hidden";
 LoadingFrame.load().then(async (loading) => {
@@ -73,6 +74,10 @@ LoadingFrame.load().then(async (loading) => {
         return;
     }
 
+    frontendDashboardServiceClient.onWillRedirect(() => {
+        willRedirect = true;
+    });
+
     document.title = frontendDashboardServiceClient.latestInfo.workspaceDescription ?? "gitpod";
     window.gitpod.loggedUserID = frontendDashboardServiceClient.latestInfo.loggedUserId;
     window.gitpod.openDesktopIDE = frontendDashboardServiceClient.openDesktopIDE.bind(frontendDashboardServiceClient);
@@ -80,9 +85,9 @@ LoadingFrame.load().then(async (loading) => {
     window.gitpod.encrypt = frontendDashboardServiceClient.encrypt.bind(frontendDashboardServiceClient);
     window.gitpod.isEncryptedData = frontendDashboardServiceClient.isEncryptedData.bind(frontendDashboardServiceClient);
 
-    (async () => {
-        const supervisorServiceClient = SupervisorServiceClient.get();
+    const supervisorServiceClient = new SupervisorServiceClient(frontendDashboardServiceClient);
 
+    (async () => {
         let hideDesktopIde = false;
         const hideDesktopIdeEventListener = frontendDashboardServiceClient.onOpenBrowserIDE(() => {
             hideDesktopIdeEventListener.dispose();
@@ -159,7 +164,7 @@ LoadingFrame.load().then(async (loading) => {
         };
         const updateCurrentFrame = () => {
             const newCurrent = nextFrame();
-            if (current === newCurrent) {
+            if (current === newCurrent || willRedirect) {
                 return;
             }
             current.style.visibility = "hidden";
@@ -256,7 +261,7 @@ LoadingFrame.load().then(async (loading) => {
         }
         if (!isWorkspaceInstancePhase("running")) {
             if (debugWorkspace && frontendDashboardServiceClient.latestInfo) {
-                window.open('', '_self')?.close()
+                window.open("", "_self")?.close();
             }
             await new Promise<void>((resolve) => {
                 frontendDashboardServiceClient.onInfoUpdate((status) => {
@@ -266,11 +271,10 @@ LoadingFrame.load().then(async (loading) => {
                 });
             });
         }
-        const supervisorServiceClient = SupervisorServiceClient.get();
         if (debugWorkspace) {
             supervisorServiceClient.supervisorWillShutdown.then(() => {
-                window.open('', '_self')?.close()
-            })
+                window.open("", "_self")?.close();
+            });
         }
         const [ideStatus] = await Promise.all([
             supervisorServiceClient.ideReady,

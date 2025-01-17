@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gitpod-io/gitpod/common-go/log"
 	glog "github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/tracing"
 	csapi "github.com/gitpod-io/gitpod/content-service/api"
@@ -21,13 +23,46 @@ import (
 	"github.com/gitpod-io/gitpod/content-service/pkg/logs"
 	"github.com/gitpod-io/gitpod/content-service/pkg/storage"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/content"
+	"github.com/gitpod-io/gitpod/ws-daemon/pkg/dispatch"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/internal/session"
+	workspacev1 "github.com/gitpod-io/gitpod/ws-manager/api/crd/v1"
 	"github.com/opentracing/opentracing-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/xerrors"
 )
 
+type Metrics struct {
+	BackupWaitingTimeHist       prometheus.Histogram
+	BackupWaitingTimeoutCounter prometheus.Counter
+	InitializerHistogram        *prometheus.HistogramVec
+}
+
+func registerConcurrentBackupMetrics(reg prometheus.Registerer, suffix string) (prometheus.Histogram, prometheus.Counter, error) {
+	backupWaitingTime := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "concurrent_backup_waiting_seconds" + suffix,
+		Help:    "waiting time for concurrent backups to finish",
+		Buckets: []float64{5, 10, 30, 60, 120, 180, 300, 600, 1800},
+	})
+
+	err := reg.Register(backupWaitingTime)
+	if err != nil {
+		return nil, nil, xerrors.Errorf("cannot register Prometheus histogram for backup waiting time: %w", err)
+	}
+
+	waitingTimeoutCounter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "concurrent_backup_waiting_timeout_total" + suffix,
+		Help: "total count of backup rate limiting timeouts",
+	})
+	err = reg.Register(waitingTimeoutCounter)
+	if err != nil {
+		return nil, nil, xerrors.Errorf("cannot register Prometheus counter for backup waiting timeouts: %w", err)
+	}
+
+	return backupWaitingTime, waitingTimeoutCounter, nil
+}
+
+//go:generate sh -c "go install github.com/golang/mock/mockgen@v1.6.0 && mockgen -destination=mock.go -package=controller . WorkspaceOperations"
 type WorkspaceOperations interface {
 	// InitWorkspace initializes the workspace content
 	InitWorkspace(ctx context.Context, options InitOptions) (string, error)
@@ -35,17 +70,22 @@ type WorkspaceOperations interface {
 	BackupWorkspace(ctx context.Context, opts BackupOptions) (*csapi.GitStatus, error)
 	// DeleteWorkspace deletes the content of the workspace from disk
 	DeleteWorkspace(ctx context.Context, instanceID string) error
+	// WipeWorkspace deletes all references to the workspace. Does not fail if parts are already gone, or state is incosistent.
+	WipeWorkspace(ctx context.Context, instanceID string) error
 	// SnapshotIDs generates the name and url for a snapshot
 	SnapshotIDs(ctx context.Context, instanceID string) (snapshotUrl, snapshotName string, err error)
 	// Snapshot takes a snapshot of the workspace
 	Snapshot(ctx context.Context, instanceID, snapshotName string) (err error)
+	// Setup ensures that the workspace has been setup
+	SetupWorkspace(ctx context.Context, instanceID string, imageInfo *workspacev1.WorkspaceImageInfo) error
 }
 
 type DefaultWorkspaceOperations struct {
 	config                 content.Config
 	provider               *WorkspaceProvider
 	backupWorkspaceLimiter chan struct{}
-	metrics                *content.Metrics
+	metrics                *Metrics
+	dispatch               *dispatch.Dispatch
 }
 
 var _ WorkspaceOperations = (*DefaultWorkspaceOperations)(nil)
@@ -57,21 +97,22 @@ type WorkspaceMeta struct {
 }
 
 type InitOptions struct {
-	Meta        WorkspaceMeta
-	Initializer *csapi.WorkspaceInitializer
-	Headless    bool
+	Meta         WorkspaceMeta
+	Initializer  *csapi.WorkspaceInitializer
+	Headless     bool
+	StorageQuota int
 }
 
 type BackupOptions struct {
 	Meta              WorkspaceMeta
-	WorkspaceLocation string
 	BackupLogs        bool
 	UpdateGitStatus   bool
 	SnapshotName      string
+	SkipBackupContent bool
 }
 
-func NewWorkspaceOperations(config content.Config, provider *WorkspaceProvider, reg prometheus.Registerer) (WorkspaceOperations, error) {
-	waitingTimeHist, waitingTimeoutCounter, err := content.RegisterConcurrentBackupMetrics(reg, "_mk2")
+func NewWorkspaceOperations(config content.Config, provider *WorkspaceProvider, reg prometheus.Registerer, dispatch *dispatch.Dispatch) (WorkspaceOperations, error) {
+	waitingTimeHist, waitingTimeoutCounter, err := registerConcurrentBackupMetrics(reg, "_mk2")
 	if err != nil {
 		return nil, err
 	}
@@ -79,18 +120,19 @@ func NewWorkspaceOperations(config content.Config, provider *WorkspaceProvider, 
 	return &DefaultWorkspaceOperations{
 		config:   config,
 		provider: provider,
-		metrics: &content.Metrics{
+		metrics: &Metrics{
 			BackupWaitingTimeHist:       waitingTimeHist,
 			BackupWaitingTimeoutCounter: waitingTimeoutCounter,
 		},
 		// we permit five concurrent backups at any given time, hence the five in the channel
 		backupWorkspaceLimiter: make(chan struct{}, 5),
+		dispatch:               dispatch,
 	}, nil
 }
 
 func (wso *DefaultWorkspaceOperations) InitWorkspace(ctx context.Context, options InitOptions) (string, error) {
-	ws, err := wso.provider.Create(ctx, options.Meta.InstanceID, filepath.Join(wso.provider.Location, options.Meta.InstanceID),
-		wso.creator(options.Meta.Owner, options.Meta.WorkspaceID, options.Meta.InstanceID, options.Initializer, false))
+	ws, err := wso.provider.NewWorkspace(ctx, options.Meta.InstanceID, filepath.Join(wso.provider.Location, options.Meta.InstanceID),
+		wso.creator(options.Meta.Owner, options.Meta.WorkspaceID, options.Meta.InstanceID, options.Initializer, false, options.StorageQuota))
 
 	if err != nil {
 		return "bug: cannot add workspace to store", xerrors.Errorf("cannot add workspace to store: %w", err)
@@ -135,12 +177,12 @@ func (wso *DefaultWorkspaceOperations) InitWorkspace(ctx context.Context, option
 
 	err = ensureCleanSlate(ws.Location)
 	if err != nil {
-		glog.Warnf("cannot ensure clean slate for workspace %s (this might break content init): %v", ws.InstanceID, err)
+		glog.WithFields(ws.OWI()).Warnf("cannot ensure clean slate for workspace %s (this might break content init): %v", ws.InstanceID, err)
 	}
 
 	err = content.RunInitializer(ctx, ws.Location, options.Initializer, remoteContent, opts)
 	if err != nil {
-		glog.Infof("error running initializer %v", err)
+		glog.WithFields(ws.OWI()).Infof("error running initializer %v", err)
 		return err.Error(), err
 	}
 
@@ -149,10 +191,12 @@ func (wso *DefaultWorkspaceOperations) InitWorkspace(ctx context.Context, option
 		return "cannot persist workspace", err
 	}
 
+	glog.WithFields(ws.OWI()).Debug("content init done")
+
 	return "", nil
 }
 
-func (wso *DefaultWorkspaceOperations) creator(owner, workspaceID, instanceID string, init *csapi.WorkspaceInitializer, storageDisabled bool) session.WorkspaceFactory {
+func (wso *DefaultWorkspaceOperations) creator(owner, workspaceID, instanceID string, init *csapi.WorkspaceInitializer, storageDisabled bool, storageQuota int) WorkspaceFactory {
 	var checkoutLocation string
 	allLocations := csapi.GetCheckoutLocationsFromInitializer(init)
 	if len(allLocations) > 0 {
@@ -168,10 +212,8 @@ func (wso *DefaultWorkspaceOperations) creator(owner, workspaceID, instanceID st
 			Owner:                 owner,
 			WorkspaceID:           workspaceID,
 			InstanceID:            instanceID,
-			FullWorkspaceBackup:   false,
-			PersistentVolumeClaim: false,
 			RemoteStorageDisabled: storageDisabled,
-			IsMk2:                 true,
+			StorageQuota:          storageQuota,
 
 			ServiceLocDaemon: filepath.Join(wso.config.WorkingArea, serviceDirName),
 			ServiceLocNode:   filepath.Join(wso.config.WorkingAreaNode, serviceDirName),
@@ -179,8 +221,20 @@ func (wso *DefaultWorkspaceOperations) creator(owner, workspaceID, instanceID st
 	}
 }
 
+func (wso *DefaultWorkspaceOperations) SetupWorkspace(ctx context.Context, instanceID string, imageInfo *workspacev1.WorkspaceImageInfo) error {
+	ws, err := wso.provider.GetAndConnect(ctx, instanceID)
+	if err != nil {
+		return fmt.Errorf("cannot setup workspace %s: %w", instanceID, err)
+	}
+	err = wso.writeImageInfo(ctx, ws, imageInfo)
+	if err != nil {
+		glog.WithError(err).WithFields(ws.OWI()).Error("cannot write image info")
+	}
+	return nil
+}
+
 func (wso *DefaultWorkspaceOperations) BackupWorkspace(ctx context.Context, opts BackupOptions) (*csapi.GitStatus, error) {
-	ws, err := wso.provider.Get(ctx, opts.Meta.InstanceID)
+	ws, err := wso.provider.GetAndConnect(ctx, opts.Meta.InstanceID)
 	if err != nil {
 		return nil, fmt.Errorf("cannot find workspace %s during DisposeWorkspace: %w", opts.Meta.InstanceID, err)
 	}
@@ -190,28 +244,33 @@ func (wso *DefaultWorkspaceOperations) BackupWorkspace(ctx context.Context, opts
 	}
 
 	if opts.BackupLogs {
-		err := wso.uploadWorkspaceLogs(ctx, opts)
+		err := wso.uploadWorkspaceLogs(ctx, opts, ws.Location)
 		if err != nil {
 			// we do not fail the workspace yet because we still might succeed with its content!
-			glog.WithError(err).Error("log backup failed")
+			glog.WithError(err).WithFields(ws.OWI()).Error("log backup failed")
 		}
+	}
+
+	if opts.SkipBackupContent {
+		return nil, nil
 	}
 
 	err = wso.uploadWorkspaceContent(ctx, ws, opts.SnapshotName)
 	if err != nil {
+		glog.WithError(err).WithFields(ws.OWI()).Error("final backup failed for workspace")
 		return nil, fmt.Errorf("final backup failed for workspace %s", opts.Meta.InstanceID)
 	}
 
 	var repo *csapi.GitStatus
 	if opts.UpdateGitStatus {
 		// Update the git status prior to deleting the workspace
-		repo, err = ws.UpdateGitStatus(ctx, false)
+		repo, err = ws.UpdateGitStatus(ctx)
 		if err != nil {
 			// do not fail workspace because we were unable to get git status
 			// which can happen for various reasons, including user corrupting his .git folder somehow
 			// instead we log the error and continue cleaning up workspace
 			// todo(pavel): it would be great if we can somehow bubble this up to user without failing workspace
-			glog.WithError(err).Warn("cannot get git status")
+			glog.WithError(err).WithFields(ws.OWI()).Warn("cannot get git status")
 		}
 	}
 
@@ -219,27 +278,74 @@ func (wso *DefaultWorkspaceOperations) BackupWorkspace(ctx context.Context, opts
 }
 
 func (wso *DefaultWorkspaceOperations) DeleteWorkspace(ctx context.Context, instanceID string) error {
-	ws, err := wso.provider.Get(ctx, instanceID)
+	ws, err := wso.provider.GetAndConnect(ctx, instanceID)
 	if err != nil {
 		return fmt.Errorf("cannot find workspace %s during DisposeWorkspace: %w", instanceID, err)
 	}
 
 	if err = ws.Dispose(ctx, wso.provider.hooks[session.WorkspaceDisposed]); err != nil {
-		glog.WithError(err).Error("cannot dispose session")
+		glog.WithError(err).WithFields(ws.OWI()).Error("cannot dispose session")
 		return err
 	}
 
 	// remove workspace daemon directory in the node
 	if err := os.RemoveAll(ws.ServiceLocDaemon); err != nil {
-		glog.WithError(err).Error("cannot delete workspace daemon directory")
+		glog.WithError(err).WithFields(ws.OWI()).Error("cannot delete workspace daemon directory")
 		return err
 	}
+	wso.provider.Remove(ctx, instanceID)
+
+	return nil
+}
+
+func (wso *DefaultWorkspaceOperations) WipeWorkspace(ctx context.Context, instanceID string) error {
+	log := log.New().WithContext(ctx)
+
+	ws, err := wso.provider.GetAndConnect(ctx, instanceID)
+	if err != nil {
+		// we have to assume everything is fine, and this workspace has already been completely wiped
+		return nil
+	}
+	log = log.WithFields(ws.OWI())
+
+	// mark this session as being wiped
+	ws.DoWipe = true
+
+	if err = ws.Dispose(ctx, wso.provider.hooks[session.WorkspaceDisposed]); err != nil {
+		log.WithError(err).Error("cannot dispose session")
+		return err
+	}
+
+	// dispose all running "dispatch handlers", e.g. all code running on the "pod informer"-triggered part of ws-daemon
+	wso.dispatch.DisposeWorkspace(ctx, instanceID)
+
+	// remove workspace daemon directory in the node
+	removedChan := make(chan struct{}, 1)
+	go func() {
+		defer close(removedChan)
+
+		if err := os.RemoveAll(ws.ServiceLocDaemon); err != nil {
+			log.WithError(err).Warn("cannot delete workspace daemon directory, leaving it dangling...")
+		}
+	}()
+
+	// We never want the "RemoveAll" to block the workspace from being delete, so we'll resort to make this a best-effort approach, and time out after 10s.
+	timeout := time.NewTicker(10 * time.Second)
+	defer timeout.Stop()
+	select {
+	case <-timeout.C:
+	case <-removedChan:
+		log.Debug("successfully removed workspace daemon directory")
+	}
+
+	// remove the reference from the WorkspaceProvider, e.g. the "workspace controller" part of ws-daemon
+	wso.provider.Remove(ctx, instanceID)
 
 	return nil
 }
 
 func (wso *DefaultWorkspaceOperations) SnapshotIDs(ctx context.Context, instanceID string) (snapshotUrl, snapshotName string, err error) {
-	sess, err := wso.provider.Get(ctx, instanceID)
+	sess, err := wso.provider.GetAndConnect(ctx, instanceID)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot find workspace %s during SnapshotName: %w", instanceID, err)
 	}
@@ -265,7 +371,7 @@ func (wso *DefaultWorkspaceOperations) Snapshot(ctx context.Context, workspaceID
 		return fmt.Errorf("workspaceID is required")
 	}
 
-	ws, err := wso.provider.Get(ctx, workspaceID)
+	ws, err := wso.provider.GetAndConnect(ctx, workspaceID)
 	if err != nil {
 		return fmt.Errorf("cannot find workspace %s during DisposeWorkspace", workspaceID)
 	}
@@ -276,6 +382,7 @@ func (wso *DefaultWorkspaceOperations) Snapshot(ctx context.Context, workspaceID
 
 	err = wso.uploadWorkspaceContent(ctx, ws, snapshotName)
 	if err != nil {
+		glog.WithError(err).WithFields(ws.OWI()).Error("snapshot failed for workspace")
 		return fmt.Errorf("snapshot failed for workspace %s", workspaceID)
 	}
 
@@ -301,9 +408,9 @@ func ensureCleanSlate(location string) error {
 	return nil
 }
 
-func (wso *DefaultWorkspaceOperations) uploadWorkspaceLogs(ctx context.Context, opts BackupOptions) (err error) {
+func (wso *DefaultWorkspaceOperations) uploadWorkspaceLogs(ctx context.Context, opts BackupOptions, location string) (err error) {
 	// currently we're only uploading prebuild log files
-	logFiles, err := logs.ListPrebuildLogFiles(ctx, opts.WorkspaceLocation)
+	logFiles, err := logs.ListPrebuildLogFiles(ctx, location)
 	if err != nil {
 		return err
 	}
@@ -325,12 +432,13 @@ func (wso *DefaultWorkspaceOperations) uploadWorkspaceLogs(ctx context.Context, 
 
 	for _, absLogPath := range logFiles {
 		taskID, parseErr := logs.ParseTaskIDFromPrebuildLogFilePath(absLogPath)
+		owi := glog.OWI(opts.Meta.Owner, opts.Meta.WorkspaceID, opts.Meta.InstanceID)
 		if parseErr != nil {
-			glog.WithError(parseErr).Warn("cannot parse headless workspace log file name")
+			glog.WithError(parseErr).WithFields(owi).Warn("cannot parse headless workspace log file name")
 			continue
 		}
 
-		err = retryIfErr(ctx, 5, glog.WithField("op", "upload log"), func(ctx context.Context) (err error) {
+		err = retryIfErr(ctx, 5, glog.WithField("op", "upload log").WithFields(owi), func(ctx context.Context) (err error) {
 			_, _, err = rs.UploadInstance(ctx, absLogPath, logs.UploadedHeadlessLogPath(taskID))
 			if err != nil {
 				return
@@ -414,18 +522,16 @@ func (wso *DefaultWorkspaceOperations) uploadWorkspaceContent(ctx context.Contex
 
 		var opts []archive.TarOption
 		opts = append(opts)
-		if !sess.FullWorkspaceBackup {
-			mappings := []archive.IDMapping{
-				{ContainerID: 0, HostID: wsinit.GitpodUID, Size: 1},
-				{ContainerID: 1, HostID: 100000, Size: 65534},
-			}
-			opts = append(opts,
-				archive.WithUIDMapping(mappings),
-				archive.WithGIDMapping(mappings),
-			)
+		mappings := []archive.IDMapping{
+			{ContainerID: 0, HostID: wsinit.GitpodUID, Size: 1},
+			{ContainerID: 1, HostID: 100000, Size: 65534},
 		}
+		opts = append(opts,
+			archive.WithUIDMapping(mappings),
+			archive.WithGIDMapping(mappings),
+		)
 
-		err = content.BuildTarbal(ctx, loc, tmpf.Name(), sess.FullWorkspaceBackup, opts...)
+		err = content.BuildTarbal(ctx, loc, tmpf.Name(), opts...)
 		if err != nil {
 			return
 		}
@@ -463,6 +569,26 @@ func (wso *DefaultWorkspaceOperations) uploadWorkspaceContent(ctx context.Contex
 		return xerrors.Errorf("cannot upload workspace content: %w", err)
 	}
 
+	return nil
+}
+
+func (wso *DefaultWorkspaceOperations) writeImageInfo(_ context.Context, ws *session.Workspace, imageInfo *workspacev1.WorkspaceImageInfo) error {
+	if imageInfo == nil {
+		return nil
+	}
+
+	b, err := json.Marshal(imageInfo)
+	if err != nil {
+		return fmt.Errorf("cannot marshal image info: %w", err)
+	}
+	uid := (wsinit.GitpodUID + 100000 - 1)
+	gid := (wsinit.GitpodGID + 100000 - 1)
+	fp := filepath.Join(ws.Location, ".gitpod/image")
+	err = os.WriteFile(fp, b, 0644)
+	if err != nil {
+		return fmt.Errorf("cannot write image info: %w", err)
+	}
+	os.Chown(fp, uid, gid)
 	return nil
 }
 

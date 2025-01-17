@@ -27,7 +27,7 @@ import (
 )
 
 // DefaultWorkspaceClass is the name of the default workspace class
-const DefaultWorkspaceClass = "default"
+const DefaultWorkspaceClass = "g1-standard"
 
 type osFS struct{}
 
@@ -123,6 +123,8 @@ type Configuration struct {
 	WorkspaceClusterHost string `json:"workspaceClusterHost"`
 	// WorkspaceClasses provide different resource classes for workspaces
 	WorkspaceClasses map[string]*WorkspaceClass `json:"workspaceClass"`
+	// PreferredWorkspaceClass is the name of the workspace class that should be used by default
+	PreferredWorkspaceClass string `json:"preferredWorkspaceClass"`
 	// DebugWorkspacePod adds extra finalizer to workspace to prevent it from shutting down. Helps to debug.
 	DebugWorkspacePod bool `json:"debugWorkspacePod,omitempty"`
 	// WorkspaceMaxConcurrentReconciles configures the max amount of concurrent workspace reconciliations on
@@ -131,16 +133,30 @@ type Configuration struct {
 	// TimeoutMaxConcurrentReconciles configures the max amount of concurrent workspace reconciliations on
 	// the timeout controller.
 	TimeoutMaxConcurrentReconciles int `json:"timeoutMaxConcurrentReconciles,omitempty"`
-	// ExperimentalMode controls if experimental features are enabled
-	ExperimentalMode bool `json:"experimentalMode"`
+	// EnableCustomSSLCertificate controls if we need to support custom SSL certificates for git operations
+	EnableCustomSSLCertificate bool `json:"enableCustomSSLCertificate"`
+	// WorkspacekitImage points to the default workspacekit image
+	WorkspacekitImage string `json:"workspacekitImage,omitempty"`
+
+	SSHGatewayCAPublicKeyFile string `json:"sshGatewayCAPublicKeyFile,omitempty"`
+
+	// SSHGatewayCAPublicKey is a CA public key
+	SSHGatewayCAPublicKey string
+
+	// PodRecreationMaxRetries
+	PodRecreationMaxRetries int `json:"podRecreationMaxRetries,omitempty"`
+	// PodRecreationBackoff
+	PodRecreationBackoff util.Duration `json:"podRecreationBackoff,omitempty"`
 }
 
 type WorkspaceClass struct {
 	Name        string                            `json:"name"`
+	Description string                            `json:"description"`
 	Container   ContainerConfiguration            `json:"container"`
 	Templates   WorkspacePodTemplateConfiguration `json:"templates"`
-	PrebuildPVC PVCConfiguration                  `json:"prebuildPVC"`
-	PVC         PVCConfiguration                  `json:"pvc"`
+
+	// CreditsPerMinute is the cost per minute for this workspace class in credits
+	CreditsPerMinute float32 `json:"creditsPerMinute"`
 }
 
 // WorkspaceTimeoutConfiguration configures the timeout behaviour of workspaces
@@ -289,22 +305,6 @@ var validWorkspaceURLTemplate = ozzo.By(func(o interface{}) error {
 
 	return err
 })
-
-// PVCConfiguration configures properties of persistent volume claim to use for workspace containers
-type PVCConfiguration struct {
-	Size          resource.Quantity `json:"size"`
-	StorageClass  string            `json:"storageClass"`
-	SnapshotClass string            `json:"snapshotClass"`
-}
-
-// Validate validates a PVC configuration
-func (c *PVCConfiguration) Validate() error {
-	return ozzo.ValidateStruct(c,
-		ozzo.Field(&c.Size, ozzo.Required),
-		ozzo.Field(&c.StorageClass, ozzo.Required),
-		ozzo.Field(&c.SnapshotClass, ozzo.Required),
-	)
-}
 
 // ContainerConfiguration configures properties of workspace pod container
 type ContainerConfiguration struct {

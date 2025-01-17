@@ -85,7 +85,11 @@ func newUsageService(t *testing.T, dbconn *gorm.DB) v1.UsageServiceClient {
 		MinForUsersOnStripe: 1000,
 	})
 
-	v1.RegisterUsageServiceServer(srv.GRPC(), NewUsageService(dbconn, DefaultWorkspacePricer, costCenterManager))
+	usageService, err := NewUsageService(dbconn, DefaultWorkspacePricer, costCenterManager, "1m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1.RegisterUsageServiceServer(srv.GRPC(), usageService)
 	baseserver.StartServerForTests(t, srv)
 
 	conn, err := grpc.Dial(srv.GRPCAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -184,7 +188,7 @@ func TestReconcile(t *testing.T) {
 		// we do this to test that the fields in the usage records get updated to reflect the true values from the source of truth - instances.
 		draft := dbtest.NewUsage(t, db.Usage{
 			ID:                  uuid.New(),
-			AttributionID:       db.NewUserAttributionID(uuid.New().String()),
+			AttributionID:       db.NewTeamAttributionID(uuid.New().String()),
 			Description:         "Some description",
 			CreditCents:         1,
 			EffectiveTime:       db.VarcharTime{},
@@ -253,12 +257,12 @@ func TestGetAndSetCostCenter(t *testing.T) {
 	conn := dbtest.ConnectForTests(t)
 	costCenterUpdates := []*v1.CostCenter{
 		{
-			AttributionId:   string(db.NewUserAttributionID(uuid.New().String())),
+			AttributionId:   string(db.NewTeamAttributionID(uuid.New().String())),
 			SpendingLimit:   8000,
 			BillingStrategy: v1.CostCenter_BILLING_STRATEGY_STRIPE,
 		},
 		{
-			AttributionId:   string(db.NewUserAttributionID(uuid.New().String())),
+			AttributionId:   string(db.NewTeamAttributionID(uuid.New().String())),
 			SpendingLimit:   500,
 			BillingStrategy: v1.CostCenter_BILLING_STRATEGY_OTHER,
 		},

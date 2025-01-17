@@ -5,11 +5,11 @@
  */
 
 import { FunctionComponent } from "react";
-import { Link } from "react-router-dom";
 import { StartWorkspaceModalKeyBinding } from "../App";
 import DropDown from "../components/DropDown";
 import search from "../icons/search.svg";
-import { Button } from "../components/Button";
+import { LinkButton } from "@podkit/buttons/LinkButton";
+import { useInstallationConfiguration } from "../data/installation/default-workspace-image-query";
 
 type WorkspacesSearchBarProps = {
     searchTerm: string;
@@ -24,8 +24,11 @@ export const WorkspacesSearchBar: FunctionComponent<WorkspacesSearchBarProps> = 
     onSearchTermUpdated,
     onLimitUpdated,
 }) => {
+    const { data: installationConfig } = useInstallationConfiguration();
+    const isDedicatedInstallation = !!installationConfig?.isDedicatedInstallation;
+
     return (
-        <div className="app-container py-2 flex">
+        <div className={!isDedicatedInstallation ? "app-container xl:!pr-4 py-5 flex" : "py-5 flex"}>
             <div className="flex relative h-10 my-auto">
                 <img src={search} title="Search" className="filter-grayscale absolute top-3 left-3" alt="search icon" />
                 <input
@@ -67,11 +70,9 @@ export const WorkspacesSearchBar: FunctionComponent<WorkspacesSearchBarProps> = 
                     ]}
                 />
             </div>
-            <Link to={"/new"}>
-                <Button className="ml-2">
-                    New Workspace <span className="opacity-60 hidden md:inline">{StartWorkspaceModalKeyBinding}</span>
-                </Button>
-            </Link>
+            <LinkButton href={"/new"} className="ml-2 gap-1.5 h-10">
+                New Workspace <span className="opacity-60 hidden md:inline">{StartWorkspaceModalKeyBinding}</span>
+            </LinkButton>
         </div>
     );
 };

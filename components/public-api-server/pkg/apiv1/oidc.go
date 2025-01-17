@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -70,17 +71,23 @@ func (s *OIDCService) CreateClientConfig(ctx context.Context, req *connect.Reque
 
 	config := req.Msg.GetConfig()
 	oidcConfig := config.GetOidcConfig()
-	err = assertIssuerIsReachable(ctx, oidcConfig.GetIssuer())
+
+	issuer, err := validateIssuerURL(oidcConfig.GetIssuer())
+	if err != nil {
+		return nil, err
+	}
+
+	err = assertIssuerIsReachable(ctx, issuer)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	err = assertIssuerProvidesDiscovery(ctx, oidcConfig.GetIssuer())
+	err = assertIssuerProvidesDiscovery(ctx, issuer)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
 	oauth2Config := config.GetOauth2Config()
-	data, err := db.EncryptJSON(s.cipher, toDbOIDCSpec(oauth2Config, oidcConfig))
+	data, err := db.EncryptJSON(s.cipher, toDbOIDCSpec(oauth2Config))
 	if err != nil {
 		log.Extract(ctx).WithError(err).Error("Failed to encrypt oidc client config.")
 		return nil, status.Errorf(codes.Internal, "Failed to store OIDC client config.")
@@ -91,7 +98,7 @@ func (s *OIDCService) CreateClientConfig(ctx context.Context, req *connect.Reque
 	created, err := db.CreateOIDCClientConfig(ctx, s.dbConn, db.OIDCClientConfig{
 		ID:             uuid.New(),
 		OrganizationID: organizationID,
-		Issuer:         oidcConfig.GetIssuer(),
+		Issuer:         issuer.String(),
 		Data:           data,
 		Active:         active,
 	})
@@ -225,19 +232,27 @@ func (s *OIDCService) UpdateClientConfig(ctx context.Context, req *connect.Reque
 	oidcConfig := config.GetOidcConfig()
 	oauth2Config := config.GetOauth2Config()
 
+	issuer := ""
 	if oidcConfig.GetIssuer() != "" {
 		// If we're updating the issuer, let's also check for reachability
-		err = assertIssuerIsReachable(ctx, oidcConfig.GetIssuer())
+		issuerURL, err := validateIssuerURL(oidcConfig.GetIssuer())
+		if err != nil {
+			return nil, err
+		}
+
+		err = assertIssuerIsReachable(ctx, issuerURL)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
+
+		issuer = issuerURL.String()
 	}
 
-	updateSpec := toDbOIDCSpec(oauth2Config, oidcConfig)
+	updateSpec := toDbOIDCSpec(oauth2Config)
 
 	if err := db.UpdateOIDCClientConfig(ctx, s.dbConn, s.cipher, db.OIDCClientConfig{
 		ID:     clientConfigID,
-		Issuer: oidcConfig.GetIssuer(),
+		Issuer: issuer,
 	}, &updateSpec); err != nil {
 		if errors.Is(err, db.ErrorNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("OIDC Client Config %s does not exist", clientConfigID.String()))
@@ -245,15 +260,6 @@ func (s *OIDCService) UpdateClientConfig(ctx context.Context, req *connect.Reque
 
 		log.Extract(ctx).WithError(err).Error("Failed to update OIDC Client config.")
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to update OIDC Client Config %s", clientConfigID.String()))
-	}
-
-	if err = db.DeactivateClientConfig(ctx, s.dbConn, clientConfigID); err != nil {
-		if errors.Is(err, db.ErrorNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("OIDC Client Config %s does not exist", clientConfigID.String()))
-		}
-
-		log.Extract(ctx).WithError(err).Error("Failed to deactivate OIDC Client config.")
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to deactivate OIDC Client Config %s", clientConfigID.String()))
 	}
 
 	return connect.NewResponse(&v1.UpdateClientConfigResponse{}), nil
@@ -295,6 +301,56 @@ func (s *OIDCService) DeleteClientConfig(ctx context.Context, req *connect.Reque
 	}
 
 	return connect.NewResponse(&v1.DeleteClientConfigResponse{}), nil
+}
+
+func (s *OIDCService) SetClientConfigActivation(ctx context.Context, req *connect.Request[v1.SetClientConfigActivationRequest]) (*connect.Response[v1.SetClientConfigActivationResponse], error) {
+	organizationID, err := validateOrganizationID(ctx, req.Msg.GetOrganizationId())
+	if err != nil {
+		return nil, err
+	}
+
+	clientConfigID, err := validateOIDCClientConfigID(ctx, req.Msg.GetId())
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := s.getConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	_, userID, err := s.getUser(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+
+	if authorizationErr := s.userIsOrgOwner(ctx, userID, organizationID); authorizationErr != nil {
+		return nil, authorizationErr
+	}
+
+	config, err := db.GetOIDCClientConfig(ctx, s.dbConn, clientConfigID)
+	if err != nil {
+		if errors.Is(err, db.ErrorNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("OIDC Client Config %s for Organization %s does not exist", clientConfigID.String(), organizationID.String()))
+		}
+
+		return nil, err
+	}
+
+	if req.Msg.Activate {
+		if config.Verified == nil || !*config.Verified {
+			log.Extract(ctx).WithError(err).Error("Failed to activate an unverified OIDC Client Config.")
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("Failed to activate an unverified OIDC Client Config %s for Organization %s", clientConfigID.String(), organizationID.String()))
+		}
+	}
+
+	err = db.SetClientConfigActiviation(ctx, s.dbConn, clientConfigID, req.Msg.Activate)
+	if err != nil {
+		log.Extract(ctx).WithError(err).Error("Failed to set OIDC Client Config activation.")
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to set OIDC Client Config activation (ID: %s) for Organization %s", clientConfigID.String(), organizationID.String()))
+	}
+
+	return connect.NewResponse(&v1.SetClientConfigActivationResponse{}), nil
 }
 
 func (s *OIDCService) getConnection(ctx context.Context) (protocol.APIInterface, error) {
@@ -356,7 +412,7 @@ func (s *OIDCService) isFeatureEnabled(ctx context.Context, conn protocol.APIInt
 }
 
 func (s *OIDCService) userIsOrgOwner(ctx context.Context, userID, orgID uuid.UUID) error {
-	membership, err := db.GetTeamMembership(ctx, s.dbConn, userID, orgID)
+	membership, err := db.GetOrganizationMembership(ctx, s.dbConn, userID, orgID)
 	if err != nil {
 		if errors.Is(err, db.ErrorNotFound) {
 			return connect.NewError(connect.CodeNotFound, fmt.Errorf("Organization %s does not exist", orgID.String()))
@@ -365,7 +421,7 @@ func (s *OIDCService) userIsOrgOwner(ctx context.Context, userID, orgID uuid.UUI
 		return connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to verify user %s is owner of organization %s", userID.String(), orgID.String()))
 	}
 
-	if membership.Role != db.TeamMembershipRole_Owner {
+	if membership.Role != db.OrganizationMembershipRole_Owner {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("user %s is not owner of organization %s", userID.String(), orgID.String()))
 	}
 
@@ -386,11 +442,14 @@ func dbOIDCClientConfigToAPI(config db.OIDCClientConfig, decryptor db.Decryptor)
 			ClientSecret:          "REDACTED",
 			AuthorizationEndpoint: decrypted.RedirectURL,
 			Scopes:                decrypted.Scopes,
+			CelExpression:         decrypted.CelExpression,
+			UsePkce:               decrypted.UsePKCE,
 		},
 		OidcConfig: &v1.OIDCConfig{
 			Issuer: config.Issuer,
 		},
-		Active: config.Active,
+		Active:   config.Active,
+		Verified: config.Verified != nil && *config.Verified,
 	}, nil
 }
 
@@ -409,16 +468,18 @@ func dbOIDCClientConfigsToAPI(configs []db.OIDCClientConfig, decryptor db.Decryp
 	return results, nil
 }
 
-func toDbOIDCSpec(oauth2Config *v1.OAuth2Config, oidcConfig *v1.OIDCConfig) db.OIDCSpec {
+func toDbOIDCSpec(oauth2Config *v1.OAuth2Config) db.OIDCSpec {
 	return db.OIDCSpec{
-		ClientID:     oauth2Config.GetClientId(),
-		ClientSecret: oauth2Config.GetClientSecret(),
-		RedirectURL:  oauth2Config.GetAuthorizationEndpoint(),
-		Scopes:       append([]string{goidc.ScopeOpenID, "profile", "email"}, oauth2Config.GetScopes()...),
+		ClientID:      oauth2Config.GetClientId(),
+		ClientSecret:  oauth2Config.GetClientSecret(),
+		CelExpression: oauth2Config.GetCelExpression(),
+		UsePKCE:       oauth2Config.GetUsePkce(),
+		RedirectURL:   oauth2Config.GetAuthorizationEndpoint(),
+		Scopes:        append([]string{goidc.ScopeOpenID, "profile", "email"}, oauth2Config.GetScopes()...),
 	}
 }
 
-func assertIssuerIsReachable(ctx context.Context, issuer string) error {
+func assertIssuerIsReachable(ctx context.Context, issuer *url.URL) error {
 	tr := &http.Transport{
 		// TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		Proxy: http.ProxyFromEnvironment,
@@ -432,7 +493,7 @@ func assertIssuerIsReachable(ctx context.Context, issuer string) error {
 		},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, issuer, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, issuer.String()+"/.well-known/openid-configuration", nil)
 	if err != nil {
 		return err
 	}
@@ -447,7 +508,7 @@ func assertIssuerIsReachable(ctx context.Context, issuer string) error {
 	return nil
 }
 
-func assertIssuerProvidesDiscovery(ctx context.Context, issuer string) error {
+func assertIssuerProvidesDiscovery(ctx context.Context, issuer *url.URL) error {
 	tr := &http.Transport{
 		// TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		Proxy: http.ProxyFromEnvironment,
@@ -461,7 +522,7 @@ func assertIssuerProvidesDiscovery(ctx context.Context, issuer string) error {
 		},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, issuer+"/.well-known/openid-configuration", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, issuer.String()+"/.well-known/openid-configuration", nil)
 	if err != nil {
 		return err
 	}
@@ -484,4 +545,13 @@ func assertIssuerProvidesDiscovery(ctx context.Context, issuer string) error {
 		return fmt.Errorf("OIDC Discovery configuration is not parsable.")
 	}
 	return nil
+}
+
+func validateIssuerURL(issuer string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSuffix(issuer, "/"))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Issuer must contain a valid URL"))
+	}
+
+	return parsed, nil
 }

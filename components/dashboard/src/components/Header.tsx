@@ -4,14 +4,14 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { useEffect } from "react";
 import { useLocation } from "react-router";
+import { useDocumentTitle } from "../hooks/use-document-title";
 import { Separator } from "./Separator";
 import TabMenuItem from "./TabMenuItem";
-import { Heading1, Subheading } from "./typography/headings";
+import { PageHeading } from "@podkit/layout/PageHeading";
 
 export interface HeaderProps {
-    title: string | React.ReactElement;
+    title: string;
     subtitle: string | React.ReactElement;
     tabs?: TabEntry[];
 }
@@ -24,24 +24,11 @@ export interface TabEntry {
 
 export default function Header(p: HeaderProps) {
     const location = useLocation();
-    useEffect(() => {
-        if (typeof p.title !== "string") {
-            return;
-        }
-        document.title = `${p.title} — Gitpod`;
-    }, [p.title]);
+    useDocumentTitle(`${p.title}`);
     return (
         <div className="app-container border-gray-200 dark:border-gray-800">
-            <div className="flex pb-8 pt-6">
-                <div className="">
-                    {typeof p.title === "string" ? <Heading1 tracking="tight">{p.title}</Heading1> : p.title}
-                    {typeof p.subtitle === "string" ? (
-                        <Subheading tracking="wide">{p.subtitle}</Subheading>
-                    ) : (
-                        p.subtitle
-                    )}
-                </div>
-            </div>
+            <PageHeading title={p.title} subtitle={p.subtitle} />
+
             <nav className="flex">
                 {p.tabs?.map((entry) => (
                     <TabMenuItem

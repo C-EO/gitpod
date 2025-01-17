@@ -8,36 +8,42 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/gitpod-io/gitpod/ws-manager/api/config"
-	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-)
-
-const (
-	LabelMaintenance = "gitpod.io/maintenanceConfig"
-	configMapName    = "ws-manager-mk2-maintenance-mode"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 var (
-	indefinite = time.Now().Add(999999 * time.Hour)
+	configMapKey = types.NamespacedName{Name: "ws-manager-mk2-maintenance-mode", Namespace: "default"}
+	// lookupOnce is used for the first call to IsEnabled to load the maintenance mode state by looking
+	// up the ConfigMap, as it's possible we haven't received a reconcile event yet to load its state.
+	lookupOnce sync.Once
 )
 
-func NewMaintenanceReconciler(c client.Client) (*MaintenanceReconciler, error) {
-	return &MaintenanceReconciler{
-		Client: c,
-		// Enable maintenance by default, until we observe the ConfigMap with the actual value.
-		// Prevents a race on startup where the workspace reconciler might run before
-		// we observe the maintenance mode ConfigMap. Better be safe and prevent
-		// reconciliation of that workspace until it's certain maintenance mode is
-		// not enabled.
-		enabledUntil: &indefinite,
-	}, nil
+func NewMaintenanceReconciler(c client.Client, reg prometheus.Registerer) (*MaintenanceReconciler, error) {
+	r := &MaintenanceReconciler{
+		Client:       c,
+		enabledUntil: nil,
+	}
+
+	gauge := newMaintenanceEnabledGauge(r)
+	reg.MustRegister(gauge)
+
+	return r, nil
 }
 
 type MaintenanceReconciler struct {
@@ -46,64 +52,112 @@ type MaintenanceReconciler struct {
 	enabledUntil *time.Time
 }
 
-func (r *MaintenanceReconciler) IsEnabled() bool {
+func (r *MaintenanceReconciler) IsEnabled(ctx context.Context) bool {
+	// On the first call, we load the maintenance mode state from the ConfigMap,
+	// as it's possible we haven't reconciled it yet.
+	lookupOnce.Do(func() {
+		if err := r.loadFromCM(ctx, configMapKey); err != nil {
+			log.FromContext(ctx).Error(err, "cannot load maintenance mode config")
+		}
+	})
+
 	return r.enabledUntil != nil && time.Now().Before(*r.enabledUntil)
 }
 
 //+kubebuilder:rbac:groups=core,resources=configmap,verbs=get;list;watch
 
 func (r *MaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx).WithValues("configMap", req.NamespacedName)
-
-	if req.Name != configMapName {
+	if req.Name != configMapKey.Name || req.Namespace != configMapKey.Namespace {
+		// Ignore all other configmaps.
 		return ctrl.Result{}, nil
 	}
 
+	return ctrl.Result{}, r.loadFromCM(ctx, req.NamespacedName)
+}
+
+func (r *MaintenanceReconciler) loadFromCM(ctx context.Context, key types.NamespacedName) error {
+	log := log.FromContext(ctx)
+
 	var cm corev1.ConfigMap
-	if err := r.Get(ctx, req.NamespacedName, &cm); err != nil {
+	if err := r.Get(ctx, key, &cm); err != nil {
 		if errors.IsNotFound(err) {
 			// ConfigMap does not exist, disable maintenance mode.
-			r.setEnabledUntil(log, nil)
-			return ctrl.Result{}, nil
+			r.setEnabledUntil(ctx, nil)
+			return nil
 		}
 
 		log.Error(err, "unable to fetch configmap")
-		return ctrl.Result{}, fmt.Errorf("failed to fetch configmap: %w", err)
+		return fmt.Errorf("failed to fetch configmap: %w", err)
 	}
 
 	configJson, ok := cm.Data["config.json"]
 	if !ok {
 		log.Info("missing config.json, setting maintenance mode as disabled")
-		r.setEnabledUntil(log, nil)
-		return ctrl.Result{}, nil
+		r.setEnabledUntil(ctx, nil)
+		return nil
 	}
 
 	var cfg config.MaintenanceConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
 		log.Error(err, "failed to unmarshal maintenance config, setting maintenance mode as disabled")
-		r.setEnabledUntil(log, nil)
-		return ctrl.Result{}, nil
+		r.setEnabledUntil(ctx, nil)
+		return nil
 	}
 
-	r.setEnabledUntil(log, cfg.EnabledUntil)
-	return ctrl.Result{}, nil
+	r.setEnabledUntil(ctx, cfg.EnabledUntil)
+	return nil
 }
 
-func (r *MaintenanceReconciler) setEnabledUntil(log logr.Logger, enabledUntil *time.Time) {
+func (r *MaintenanceReconciler) setEnabledUntil(ctx context.Context, enabledUntil *time.Time) {
 	if enabledUntil == r.enabledUntil {
 		// Nothing to do.
 		return
 	}
 
 	r.enabledUntil = enabledUntil
-	log.Info("maintenance mode state change", "enabled", r.IsEnabled(), "enabledUntil", enabledUntil)
+	log.FromContext(ctx).Info("maintenance mode state change", "enabledUntil", enabledUntil)
 }
 
-func (r *MaintenanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		Named("maintenance").
-		// The controller manager filters watch events only to ConfigMaps with the LabelMaintenance label set to "true".
-		// See components/ws-manager-mk2/main.go's NewCache function in the manager options.
-		For(&corev1.ConfigMap{}).
-		Complete(r)
+func (r *MaintenanceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+	// We need to use an unmanaged controller to avoid issues when the pod is in standby mode.
+	// In that scenario, the controllers are not started and don't watch changes and only
+	// observe the maintenance mode during the initialization.
+	c, err := controller.NewUnmanaged("maintenance-controller", mgr, controller.Options{Reconciler: r})
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		err = c.Start(ctx)
+		if err != nil {
+			log.FromContext(ctx).Error(err, "cannot start maintenance reconciler")
+			os.Exit(1)
+		}
+	}()
+
+	return c.Watch(source.Kind(mgr.GetCache(), &corev1.ConfigMap{}), &handler.EnqueueRequestForObject{}, &filterConfigMap{})
+}
+
+type filterConfigMap struct {
+	predicate.Funcs
+}
+
+func (f filterConfigMap) Create(e event.CreateEvent) bool {
+	return f.filter(e.Object)
+}
+
+func (f filterConfigMap) Update(e event.UpdateEvent) bool {
+	return f.filter(e.ObjectNew)
+}
+
+func (f filterConfigMap) Generic(e event.GenericEvent) bool {
+	return f.filter(e.Object)
+}
+
+func (f filterConfigMap) filter(obj client.Object) bool {
+	if obj == nil {
+		return false
+	}
+
+	return obj.GetName() == configMapKey.Name && obj.GetNamespace() == configMapKey.Namespace
 }

@@ -22,7 +22,6 @@ type Config struct {
 	ReadinessProbeAddr string                       `json:"readinessProbeAddr"`
 	Namespace          string                       `json:"namespace"`
 	WorkspaceManager   *WorkspaceManagerConn        `json:"wsManager"`
-	EnableWorkspaceCRD bool                         `json:"enableWorkspaceCRD"`
 }
 
 type WorkspaceManagerConn struct {
@@ -64,6 +63,5 @@ func GetConfig(fn string) (*Config, error) {
 	if err != nil {
 		return nil, xerrors.Errorf("config validation error: %w", err)
 	}
-
 	return &cfg, nil
 }

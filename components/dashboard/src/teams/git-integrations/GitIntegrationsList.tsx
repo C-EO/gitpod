@@ -4,17 +4,17 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { AuthProviderEntry } from "@gitpod/gitpod-protocol";
 import { FunctionComponent, useCallback, useState } from "react";
-import { Button } from "../../components/Button";
+import { Button } from "@podkit/buttons/Button";
 import { EmptyMessage } from "../../components/EmptyMessage";
 import { Item, ItemField, ItemFieldIcon, ItemsList } from "../../components/ItemsList";
 import { Heading2, Subheading } from "../../components/typography/headings";
 import { GitIntegrationListItem } from "./GitIntegrationListItem";
 import { GitIntegrationModal } from "./GitIntegrationModal";
+import { AuthProvider } from "@gitpod/public-api/lib/gitpod/v1/authprovider_pb";
 
 type Props = {
-    providers: AuthProviderEntry[];
+    providers: AuthProvider[];
 };
 export const GitIntegrationsList: FunctionComponent<Props> = ({ providers }) => {
     const [showCreateModal, setShowCreateModal] = useState(false);
@@ -26,14 +26,14 @@ export const GitIntegrationsList: FunctionComponent<Props> = ({ providers }) => 
         <>
             <div className="flex flex-col space-y-2 md:flex-row md:items-start md:justify-between md:space-y-0">
                 <div>
-                    <Heading2>Git Integrations</Heading2>
-                    <Subheading>Configure a Git Integration for your organization.</Subheading>
+                    <Heading2>Git Provider</Heading2>
+                    <Subheading>Configure Git provider integrations for your organization.</Subheading>
                 </div>
 
                 {providers.length !== 0 ? (
-                    <div className="">
+                    <div>
                         <Button className="whitespace-nowrap" onClick={onCreate}>
-                            New Git Integration
+                            New Git Provider
                         </Button>
                     </div>
                 ) : null}
@@ -41,9 +41,9 @@ export const GitIntegrationsList: FunctionComponent<Props> = ({ providers }) => 
 
             {providers.length === 0 ? (
                 <EmptyMessage
-                    title="No Git Integrations"
-                    subtitle="Configure a Git Integration with GitHub, GitLab, or Bitbucket Server."
-                    buttonText="New Git Integration"
+                    title="No Git Providers"
+                    subtitle="Configure a Git Provider with GitHub, GitLab, or Bitbucket Server."
+                    buttonText="New Git Provider"
                     onClick={onCreate}
                 />
             ) : (

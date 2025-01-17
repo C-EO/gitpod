@@ -5,11 +5,11 @@
  */
 
 import { OrgSettingsPage } from "./OrgSettingsPage";
-import { AttributionId } from "@gitpod/gitpod-protocol/lib/attribution";
 import { BillingMode } from "@gitpod/gitpod-protocol/lib/billing-mode";
 import UsageBasedBillingConfig from "../components/UsageBasedBillingConfig";
 import { useOrgBillingMode } from "../data/billing-mode/org-billing-mode-query";
-import { useCurrentOrg } from "../data/organizations/orgs-query";
+import { useIsOwner } from "../data/organizations/members-query";
+import { Redirect } from "react-router";
 
 export default function TeamUsageBasedBillingPage() {
     return (
@@ -20,19 +20,16 @@ export default function TeamUsageBasedBillingPage() {
 }
 
 function TeamUsageBasedBilling() {
-    const org = useCurrentOrg().data;
     const orgBillingMode = useOrgBillingMode();
+    const isOwner = useIsOwner();
+
+    if (!isOwner) {
+        return <Redirect to="/settings" />;
+    }
 
     if (!BillingMode.showUsageBasedBilling(orgBillingMode.data)) {
         return <></>;
     }
 
-    return (
-        <>
-            <UsageBasedBillingConfig
-                hideSubheading
-                attributionId={org && AttributionId.render({ kind: "team", teamId: org.id })}
-            />
-        </>
-    );
+    return <UsageBasedBillingConfig hideSubheading />;
 }

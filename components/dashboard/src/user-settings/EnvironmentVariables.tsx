@@ -5,15 +5,17 @@
  */
 
 import { UserEnvVar, UserEnvVarValue } from "@gitpod/gitpod-protocol";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ConfirmationModal from "../components/ConfirmationModal";
 import { Item, ItemField, ItemsList } from "../components/ItemsList";
 import Modal, { ModalBody, ModalFooter, ModalHeader } from "../components/Modal";
-import { getGitpodService } from "../service/service";
 import { PageWithSettingsSubMenu } from "./PageWithSettingsSubMenu";
 import { EnvironmentVariableEntry } from "./EnvironmentVariableEntry";
-import { Button } from "../components/Button";
 import { Heading2, Subheading } from "../components/typography/headings";
+import { envVarClient } from "../service/public-api";
+import { UserEnvironmentVariable } from "@gitpod/public-api/lib/gitpod/v1/envvar_pb";
+import { Button } from "@podkit/buttons/Button";
+import { TextInputField } from "../components/forms/TextInputField";
 
 interface EnvVarModalProps {
     envVar: UserEnvVarValue;
@@ -39,74 +41,53 @@ function AddEnvVarModal(p: EnvVarModalProps) {
     }, [p.envVar]);
 
     const isNew = !p.envVar.id;
-    let save = () => {
+    let save = useCallback(async () => {
         const v = ref.current;
         const errorMsg = p.validate(v);
         if (!!errorMsg) {
             setError(errorMsg);
-            return false;
         } else {
-            p.save(v);
+            await p.save(v);
             p.onClose();
-            return true;
         }
-    };
+    }, [p]);
 
     return (
-        // TODO: Use title and buttons props
-        <Modal visible={true} onClose={p.onClose} onEnter={save}>
+        <Modal visible={true} onClose={p.onClose} onSubmit={save}>
             <ModalHeader>{isNew ? "New" : "Edit"} Variable</ModalHeader>
             <ModalBody>
                 {error ? (
-                    <div className="bg-gitpod-kumquat-light rounded-md p-3 text-gitpod-red text-sm mb-2">{error}</div>
+                    <div className="bg-kumquat-light rounded-md p-3 text-gitpod-red text-sm mb-2">{error}</div>
                 ) : null}
-                <div>
-                    <h4>Name</h4>
-                    <input
-                        autoFocus
-                        className="w-full"
-                        type="text"
-                        value={ev.name}
-                        onChange={(v) => {
-                            update({ name: v.target.value });
-                        }}
-                    />
-                </div>
-                <div className="mt-4">
-                    <h4>Value</h4>
-                    <input
-                        className="w-full"
-                        type="text"
-                        value={ev.value}
-                        onChange={(v) => {
-                            update({ value: v.target.value });
-                        }}
-                    />
-                </div>
-                <div className="mt-4">
-                    <h4>Scope</h4>
-                    <input
-                        className="w-full"
-                        type="text"
-                        value={ev.repositoryPattern}
-                        placeholder="e.g. owner/repository"
-                        onChange={(v) => {
-                            update({ repositoryPattern: v.target.value });
-                        }}
-                    />
-                </div>
-                <div className="mt-1">
-                    <p className="text-gray-500">
-                        You can pass a variable for a specific project or use wildcard character (<code>*/*</code>) to
-                        make it available in more projects.
-                    </p>
-                </div>
+                <TextInputField
+                    label="Name"
+                    value={ev.name}
+                    type="text"
+                    autoFocus
+                    onChange={(val) => update({ name: val })}
+                />
+
+                <TextInputField label="Value" value={ev.value} type="text" onChange={(val) => update({ value: val })} />
+
+                <TextInputField
+                    label="Scope"
+                    hint={
+                        <>
+                            You can pass a variable for a specific project or use wildcard character (<code>*/*</code>)
+                            to make it available in more projects.
+                        </>
+                    }
+                    value={ev.repositoryPattern}
+                    type="text"
+                    placeholder="e.g. owner/repository"
+                    onChange={(val) => update({ repositoryPattern: val })}
+                />
             </ModalBody>
             <ModalFooter>
-                <Button type="secondary" onClick={p.onClose}>
+                <Button variant="secondary" onClick={p.onClose}>
                     Cancel
                 </Button>
-                <Button onClick={save}>{isNew ? "Add" : "Update"} Variable</Button>
+                <Button type="submit">{isNew ? "Add" : "Update"} Variable</Button>
             </ModalFooter>
         </Modal>
     );
@@ -119,8 +100,8 @@ function DeleteEnvVarModal(p: { variable: UserEnvVarValue; deleteVariable: () =>
             areYouSureText="Are you sure you want to delete this variable?"
             buttonText="Delete Variable"
             onClose={p.onClose}
-            onConfirm={() => {
-                p.deleteVariable();
+            onConfirm={async () => {
+                await p.deleteVariable();
                 p.onClose();
             }}
         >
@@ -136,7 +117,7 @@ function DeleteEnvVarModal(p: { variable: UserEnvVarValue; deleteVariable: () =>
     );
 }
 
-function sortEnvVars(a: UserEnvVarValue, b: UserEnvVarValue) {
+function sortEnvVars(a: UserEnvironmentVariable, b: UserEnvironmentVariable) {
     if (a.name === b.name) {
         return a.repositoryPattern > b.repositoryPattern ? 1 : -1;
     }
@@ -146,6 +127,7 @@ function sortEnvVars(a: UserEnvVarValue, b: UserEnvVarValue) {
 export default function EnvVars() {
     const [envVars, setEnvVars] = useState([] as UserEnvVarValue[]);
     const [currentEnvVar, setCurrentEnvVar] = useState({
+        id: undefined,
         name: "",
         value: "",
         repositoryPattern: "",
@@ -153,9 +135,16 @@ export default function EnvVars() {
     const [isAddEnvVarModalVisible, setAddEnvVarModalVisible] = useState(false);
     const [isDeleteEnvVarModalVisible, setDeleteEnvVarModalVisible] = useState(false);
     const update = async () => {
-        await getGitpodService()
-            .server.getAllEnvVars()
-            .then((r) => setEnvVars(r.sort(sortEnvVars)));
+        await envVarClient.listUserEnvironmentVariables({}).then((r) =>
+            setEnvVars(
+                r.environmentVariables.sort(sortEnvVars).map((e) => ({
+                    id: e.id,
+                    name: e.name,
+                    value: e.value,
+                    repositoryPattern: e.repositoryPattern,
+                })),
+            ),
+        );
     };
 
     useEffect(() => {
@@ -163,7 +152,7 @@ export default function EnvVars() {
     }, []);
 
     const add = () => {
-        setCurrentEnvVar({ name: "", value: "", repositoryPattern: "" });
+        setCurrentEnvVar({ id: undefined, name: "", value: "", repositoryPattern: "" });
         setAddEnvVarModalVisible(true);
         setDeleteEnvVarModalVisible(false);
     };
@@ -181,12 +170,28 @@ export default function EnvVars() {
     };
 
     const save = async (variable: UserEnvVarValue) => {
-        await getGitpodService().server.setEnvVar(variable);
+        if (variable.id) {
+            await envVarClient.updateUserEnvironmentVariable({
+                environmentVariableId: variable.id,
+                name: variable.name,
+                value: variable.value,
+                repositoryPattern: variable.repositoryPattern,
+            });
+        } else {
+            await envVarClient.createUserEnvironmentVariable({
+                name: variable.name,
+                value: variable.value,
+                repositoryPattern: variable.repositoryPattern,
+            });
+        }
+
         await update();
     };
 
     const deleteVariable = async (variable: UserEnvVarValue) => {
-        await getGitpodService().server.deleteEnvVar(variable);
+        await envVarClient.deleteUserEnvironmentVariable({
+            environmentVariableId: variable.id,
+        });
         await update();
     };
 
@@ -216,7 +221,7 @@ export default function EnvVars() {
             {isDeleteEnvVarModalVisible && (
                 <DeleteEnvVarModal
                     variable={currentEnvVar}
-                    deleteVariable={() => deleteVariable(currentEnvVar)}
+                    deleteVariable={async () => await deleteVariable(currentEnvVar)}
                     onClose={() => setDeleteEnvVarModalVisible(false)}
                 />
             )}
@@ -236,10 +241,10 @@ export default function EnvVars() {
                     </Subheading>
                 </div>
                 {envVars.length !== 0 ? (
-                    <div className="mt-3 flex mt-0">
-                        <button onClick={add} className="ml-2">
+                    <div className="flex mt-0">
+                        <Button onClick={add} className="ml-2">
                             New Variable
-                        </button>
+                        </Button>
                     </div>
                 ) : null}
             </div>
@@ -253,7 +258,7 @@ export default function EnvVars() {
                             In addition to user-specific environment variables you can also pass variables through a
                             workspace creation URL.
                         </Subheading>
-                        <button onClick={add}>New Variable</button>
+                        <Button onClick={add}>New Variable</Button>
                     </div>
                 </div>
             ) : (
@@ -264,6 +269,7 @@ export default function EnvVars() {
                     </Item>
                     {envVars.map((variable) => (
                         <EnvironmentVariableEntry
+                            key={variable.id}
                             variable={variable}
                             edit={edit}
                             confirmDeleteVariable={confirmDeleteVariable}

@@ -34,7 +34,7 @@ func (sub *tasksSubscription) Updates() <-chan []*api.TaskStatus {
 	return sub.updates
 }
 
-const maxSubscriptions = 10
+const maxSubscriptions = 100
 
 func (tm *tasksManager) Subscribe() *tasksSubscription {
 	tm.mu.Lock()
@@ -132,6 +132,18 @@ func (tm *tasksManager) Status() []*api.TaskStatus {
 	return tm.getStatus()
 }
 
+func (tm *tasksManager) getTaskStatus(taskID string) *api.TaskStatus {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	for _, t := range tm.tasks {
+		if t.Id == taskID {
+			return &t.TaskStatus
+		}
+	}
+	return nil
+}
+
 // getStatus produces an API compatible task status list.
 // Callers are expected to hold mu.
 func (tm *tasksManager) getStatus() []*api.TaskStatus {
@@ -181,11 +193,8 @@ func (tm *tasksManager) init(ctx context.Context) {
 		log.WithError(err).Error()
 		return
 	}
-	if tasks == nil && tm.config.isHeadless() {
+	if len(tasks) == 0 && tm.config.isHeadless() {
 		return
-	}
-	if tasks == nil {
-		tasks = &[]TaskConfig{{}}
 	}
 
 	select {
@@ -200,7 +209,7 @@ func (tm *tasksManager) init(ctx context.Context) {
 	// give 1s window between content and tasks for IDE to startup, i.e. no competition for resources
 	tm.waitForIde(ctx, 1*time.Second)
 
-	for i, config := range *tasks {
+	for i, config := range tasks {
 		id := strconv.Itoa(i)
 		presentation := &api.TaskPresentation{}
 		if config.Name != nil {
@@ -314,9 +323,18 @@ func (tm *tasksManager) Run(ctx context.Context, wg *sync.WaitGroup, successChan
 			return true
 		})
 
+		taskWatchWg := &sync.WaitGroup{}
+
 		go func(t *task, term *terminal.Term) {
 			state, err := term.Wait()
-			if state != nil {
+			taskLog.Info("task terminal has been closed. Waiting for watch() to finish...")
+			taskWatchWg.Wait()
+			taskLog.Info("watch() has finished, setting task state to closed")
+
+			if term.ForceSuccess {
+				// Simulate state.Success()
+				t.successChan <- taskSuccessful
+			} else if state != nil {
 				if state.Success() {
 					t.successChan <- taskSuccessful
 				} else {
@@ -332,11 +350,10 @@ func (tm *tasksManager) Run(ctx context.Context, wg *sync.WaitGroup, successChan
 
 				t.successChan <- taskFailed(fmt.Sprintf("%s: %s", msg, t.lastOutput))
 			}
-			taskLog.Info("task terminal has been closed")
 			tm.setTaskState(t, api.TaskState_closed)
 		}(t, term)
 
-		tm.watch(t, term)
+		tm.watch(t, term, taskWatchWg)
 
 		if t.command != "" {
 			term.PTY.Write([]byte(t.command + "\n"))
@@ -437,7 +454,7 @@ func prebuildLogFileName(task *task, storeLocation string) string {
 	return logs.PrebuildLogFileName(storeLocation, task.Id)
 }
 
-func (tm *tasksManager) watch(task *task, term *terminal.Term) {
+func (tm *tasksManager) watch(task *task, term *terminal.Term, wg *sync.WaitGroup) {
 	if !tm.config.isPrebuild() {
 		return
 	}
@@ -452,6 +469,9 @@ func (tm *tasksManager) watch(task *task, term *terminal.Term) {
 	)
 	go func() {
 		defer stdout.Close()
+
+		wg.Add(1)
+		defer wg.Done()
 
 		var (
 			fileName    = prebuildLogFileName(task, tm.storeLocation)

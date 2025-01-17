@@ -5,14 +5,15 @@
  */
 
 import { ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
-import { useEffect } from "react";
 import Alert from "../components/Alert";
-import { Heading2 } from "../components/typography/headings";
 import { UsageLimitReachedModal } from "../components/UsageLimitReachedModal";
-import gitpodIcon from "../icons/gitpod.svg";
+import { Heading2 } from "../components/typography/headings";
+import { useDocumentTitle } from "../hooks/use-document-title";
 import { gitpodHostUrl } from "../service/service";
 import { VerifyModal } from "./VerifyModal";
-import CDEUniverseLogo from "../images/cdeuniverse.svg";
+import { useWorkspaceDefaultImageQuery } from "../data/workspaces/default-workspace-image-query";
+import { GetWorkspaceDefaultImageResponse_Source } from "@gitpod/public-api/lib/gitpod/v1/workspace_pb";
+import { ProductLogo } from "../components/ProductLogo";
 
 export enum StartPhase {
     Checking = 0,
@@ -82,6 +83,7 @@ export interface StartPageProps {
     title?: string;
     children?: React.ReactNode;
     showLatestIdeWarning?: boolean;
+    workspaceId?: string;
 }
 
 export interface StartWorkspaceError {
@@ -91,18 +93,14 @@ export interface StartWorkspaceError {
 }
 
 export function StartPage(props: StartPageProps) {
-    const { phase, error } = props;
+    const { phase, error, workspaceId } = props;
     let title = props.title || getPhaseTitle(phase, error);
-    useEffect(() => {
-        document.title = "Starting — Gitpod";
-    }, []);
+    useDocumentTitle("Starting");
     return (
         <div className="w-screen h-screen align-middle">
             <div className="flex flex-col mx-auto items-center text-center h-screen">
                 <div className="h-1/3"></div>
-                <img
-                    src={gitpodIcon}
-                    alt="Gitpod's logo"
+                <ProductLogo
                     className={`h-16 flex-shrink-0 ${
                         error || phase === StartPhase.Stopped || phase === StartPhase.IdeReady ? "" : "animate-bounce"
                     }`}
@@ -112,32 +110,14 @@ export function StartPage(props: StartPageProps) {
                     <ProgressBar phase={phase} error={!!error} />
                 )}
                 {error && error.code === ErrorCodes.NEEDS_VERIFICATION && <VerifyModal />}
-                {error && error.code === ErrorCodes.PAYMENT_SPENDING_LIMIT_REACHED && (
-                    <UsageLimitReachedModal hints={error?.data} />
-                )}
+                {error && error.code === ErrorCodes.PAYMENT_SPENDING_LIMIT_REACHED && <UsageLimitReachedModal />}
                 {error && <StartError error={error} />}
                 {props.children}
-                {props.showLatestIdeWarning && (
-                    <Alert type="warning" className="mt-4 w-96">
-                        This workspace is configured with the latest release (unstable) for the editor.{" "}
-                        <a
-                            className="gp-link"
-                            target="_blank"
-                            rel="noreferrer"
-                            href={gitpodHostUrl.asPreferences().toString()}
-                        >
-                            Change Preferences
-                        </a>
-                    </Alert>
-                )}
-                <div className="absolute bottom-4 right-4 text-gray-400 dark:text-gray-500 text-xs font-medium tracking-wide">
-                    <a href="https://cdeuniverse.com/" target="_blank" rel="noreferrer noopener">
-                        <span>
-                            <img src={CDEUniverseLogo} alt="CDE Universe logo" className="h-4 inline mr-1" />
-                            <span className="font-semibold">CDE Universe</span>: June 1 & 2 ↗
-                        </span>
-                    </a>
-                </div>
+                <WarningView
+                    workspaceId={workspaceId}
+                    showLatestIdeWarning={props.showLatestIdeWarning}
+                    error={props.error}
+                />
             </div>
         </div>
     );
@@ -149,4 +129,40 @@ function StartError(props: { error: StartWorkspaceError }) {
         return null;
     }
     return <p className="text-base text-gitpod-red w-96">{error.message}</p>;
+}
+
+function WarningView(props: { workspaceId?: string; showLatestIdeWarning?: boolean; error?: StartWorkspaceError }) {
+    const { data: imageInfo } = useWorkspaceDefaultImageQuery(props.workspaceId);
+    let useWarning: "latestIde" | "orgImage" | undefined = props.showLatestIdeWarning ? "latestIde" : undefined;
+    if (
+        props.error &&
+        props.workspaceId &&
+        imageInfo &&
+        imageInfo.source === GetWorkspaceDefaultImageResponse_Source.ORGANIZATION
+    ) {
+        useWarning = "orgImage";
+    }
+    return (
+        <div>
+            {useWarning === "latestIde" && (
+                <Alert type="warning" className="mt-4 w-96">
+                    This workspace is configured with the latest release (unstable) for the editor.{" "}
+                    <a
+                        className="gp-link"
+                        target="_blank"
+                        rel="noreferrer"
+                        href={gitpodHostUrl.asPreferences().toString()}
+                    >
+                        Change Preferences
+                    </a>
+                </Alert>
+            )}
+            {useWarning === "orgImage" && (
+                <Alert className="w-96 mt-4" type="warning">
+                    <span className="font-medium">Could not use workspace image?</span> Try a different workspace image
+                    in the yaml configuration or check the default workspace image in organization settings.
+                </Alert>
+            )}
+        </div>
+    );
 }

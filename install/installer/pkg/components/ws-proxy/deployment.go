@@ -8,9 +8,7 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/baseserver"
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
-	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 
-	wsmanager "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager"
 	wsmanagermk2 "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager-mk2"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -25,6 +23,7 @@ import (
 func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 	labels := common.CustomizeLabel(ctx, Component, common.TypeMetaDeployment)
 
+	//nolint:typecheck
 	configHash, err := common.ObjectHash(configmap(ctx))
 	if err != nil {
 		return nil, err
@@ -63,14 +62,24 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		})
 	}
 
-	wsmanSecret := wsmanager.TLSSecretNameClient
-	_ = ctx.WithExperimental(func(ucfg *experimental.Config) error {
-		if ucfg.Workspace != nil && ucfg.Workspace.UseWsmanagerMk2 {
-			wsmanSecret = wsmanagermk2.TLSSecretNameClient
-		}
+	if ctx.Config.SSHGatewayCAKey != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: "ca-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: ctx.Config.SSHGatewayCAKey.Name,
+					Optional:   pointer.Bool(true),
+				},
+			},
+		})
 
-		return nil
-	})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "ca-key",
+			MountPath: "/mnt/ca-key/ca.key",
+			SubPath:   "ca.key",
+			ReadOnly:  true,
+		})
+	}
 
 	podSpec := corev1.PodSpec{
 		PriorityClassName:         common.SystemNodeCritical,
@@ -81,6 +90,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsUser: pointer.Int64(31002),
 		},
+		TerminationGracePeriodSeconds: pointer.Int64(360),
 		Volumes: append([]corev1.Volume{
 			{
 				Name: "config",
@@ -94,7 +104,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 				Name: "ws-manager-client-tls-certs",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName: wsmanSecret,
+						SecretName: wsmanagermk2.TLSSecretNameClient,
 					},
 				},
 			},
@@ -132,6 +142,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 				common.DefaultEnv(&ctx.Config),
 				common.WorkspaceTracingEnv(ctx, Component),
 				common.AnalyticsEnv(&ctx.Config),
+				// ws-proxy and proxy may not in the same cluster
+				common.ConfigcatEnvOutOfCluster(ctx),
 			)),
 			ReadinessProbe: &corev1.Probe{
 				InitialDelaySeconds: int32(2),

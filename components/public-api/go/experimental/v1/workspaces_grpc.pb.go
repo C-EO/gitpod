@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2025 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -36,6 +36,8 @@ type WorkspacesServiceClient interface {
 	GetOwnerToken(ctx context.Context, in *GetOwnerTokenRequest, opts ...grpc.CallOption) (*GetOwnerTokenResponse, error)
 	// CreateAndStartWorkspace creates a new workspace and starts it.
 	CreateAndStartWorkspace(ctx context.Context, in *CreateAndStartWorkspaceRequest, opts ...grpc.CallOption) (*CreateAndStartWorkspaceResponse, error)
+	// StartWorkspace starts an existing workspace.
+	StartWorkspace(ctx context.Context, in *StartWorkspaceRequest, opts ...grpc.CallOption) (*StartWorkspaceResponse, error)
 	// StopWorkspace stops a running workspace (instance).
 	// Errors:
 	//
@@ -47,6 +49,10 @@ type WorkspacesServiceClient interface {
 	// Deleted workspaces cannot be started again.
 	DeleteWorkspace(ctx context.Context, in *DeleteWorkspaceRequest, opts ...grpc.CallOption) (*DeleteWorkspaceResponse, error)
 	UpdatePort(ctx context.Context, in *UpdatePortRequest, opts ...grpc.CallOption) (*UpdatePortResponse, error)
+	// ListWorkspaceClasses enumerates all available workspace classes.
+	ListWorkspaceClasses(ctx context.Context, in *ListWorkspaceClassesRequest, opts ...grpc.CallOption) (*ListWorkspaceClassesResponse, error)
+	// GetDefaultWorkspaceImage returns the default workspace image from different sources.
+	GetDefaultWorkspaceImage(ctx context.Context, in *GetDefaultWorkspaceImageRequest, opts ...grpc.CallOption) (*GetDefaultWorkspaceImageResponse, error)
 }
 
 type workspacesServiceClient struct {
@@ -125,6 +131,15 @@ func (c *workspacesServiceClient) CreateAndStartWorkspace(ctx context.Context, i
 	return out, nil
 }
 
+func (c *workspacesServiceClient) StartWorkspace(ctx context.Context, in *StartWorkspaceRequest, opts ...grpc.CallOption) (*StartWorkspaceResponse, error) {
+	out := new(StartWorkspaceResponse)
+	err := c.cc.Invoke(ctx, "/gitpod.experimental.v1.WorkspacesService/StartWorkspace", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workspacesServiceClient) StopWorkspace(ctx context.Context, in *StopWorkspaceRequest, opts ...grpc.CallOption) (*StopWorkspaceResponse, error) {
 	out := new(StopWorkspaceResponse)
 	err := c.cc.Invoke(ctx, "/gitpod.experimental.v1.WorkspacesService/StopWorkspace", in, out, opts...)
@@ -152,6 +167,24 @@ func (c *workspacesServiceClient) UpdatePort(ctx context.Context, in *UpdatePort
 	return out, nil
 }
 
+func (c *workspacesServiceClient) ListWorkspaceClasses(ctx context.Context, in *ListWorkspaceClassesRequest, opts ...grpc.CallOption) (*ListWorkspaceClassesResponse, error) {
+	out := new(ListWorkspaceClassesResponse)
+	err := c.cc.Invoke(ctx, "/gitpod.experimental.v1.WorkspacesService/ListWorkspaceClasses", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workspacesServiceClient) GetDefaultWorkspaceImage(ctx context.Context, in *GetDefaultWorkspaceImageRequest, opts ...grpc.CallOption) (*GetDefaultWorkspaceImageResponse, error) {
+	out := new(GetDefaultWorkspaceImageResponse)
+	err := c.cc.Invoke(ctx, "/gitpod.experimental.v1.WorkspacesService/GetDefaultWorkspaceImage", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkspacesServiceServer is the server API for WorkspacesService service.
 // All implementations must embed UnimplementedWorkspacesServiceServer
 // for forward compatibility
@@ -166,6 +199,8 @@ type WorkspacesServiceServer interface {
 	GetOwnerToken(context.Context, *GetOwnerTokenRequest) (*GetOwnerTokenResponse, error)
 	// CreateAndStartWorkspace creates a new workspace and starts it.
 	CreateAndStartWorkspace(context.Context, *CreateAndStartWorkspaceRequest) (*CreateAndStartWorkspaceResponse, error)
+	// StartWorkspace starts an existing workspace.
+	StartWorkspace(context.Context, *StartWorkspaceRequest) (*StartWorkspaceResponse, error)
 	// StopWorkspace stops a running workspace (instance).
 	// Errors:
 	//
@@ -177,6 +212,10 @@ type WorkspacesServiceServer interface {
 	// Deleted workspaces cannot be started again.
 	DeleteWorkspace(context.Context, *DeleteWorkspaceRequest) (*DeleteWorkspaceResponse, error)
 	UpdatePort(context.Context, *UpdatePortRequest) (*UpdatePortResponse, error)
+	// ListWorkspaceClasses enumerates all available workspace classes.
+	ListWorkspaceClasses(context.Context, *ListWorkspaceClassesRequest) (*ListWorkspaceClassesResponse, error)
+	// GetDefaultWorkspaceImage returns the default workspace image from different sources.
+	GetDefaultWorkspaceImage(context.Context, *GetDefaultWorkspaceImageRequest) (*GetDefaultWorkspaceImageResponse, error)
 	mustEmbedUnimplementedWorkspacesServiceServer()
 }
 
@@ -199,6 +238,9 @@ func (UnimplementedWorkspacesServiceServer) GetOwnerToken(context.Context, *GetO
 func (UnimplementedWorkspacesServiceServer) CreateAndStartWorkspace(context.Context, *CreateAndStartWorkspaceRequest) (*CreateAndStartWorkspaceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateAndStartWorkspace not implemented")
 }
+func (UnimplementedWorkspacesServiceServer) StartWorkspace(context.Context, *StartWorkspaceRequest) (*StartWorkspaceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartWorkspace not implemented")
+}
 func (UnimplementedWorkspacesServiceServer) StopWorkspace(context.Context, *StopWorkspaceRequest) (*StopWorkspaceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StopWorkspace not implemented")
 }
@@ -207,6 +249,12 @@ func (UnimplementedWorkspacesServiceServer) DeleteWorkspace(context.Context, *De
 }
 func (UnimplementedWorkspacesServiceServer) UpdatePort(context.Context, *UpdatePortRequest) (*UpdatePortResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdatePort not implemented")
+}
+func (UnimplementedWorkspacesServiceServer) ListWorkspaceClasses(context.Context, *ListWorkspaceClassesRequest) (*ListWorkspaceClassesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListWorkspaceClasses not implemented")
+}
+func (UnimplementedWorkspacesServiceServer) GetDefaultWorkspaceImage(context.Context, *GetDefaultWorkspaceImageRequest) (*GetDefaultWorkspaceImageResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetDefaultWorkspaceImage not implemented")
 }
 func (UnimplementedWorkspacesServiceServer) mustEmbedUnimplementedWorkspacesServiceServer() {}
 
@@ -314,6 +362,24 @@ func _WorkspacesService_CreateAndStartWorkspace_Handler(srv interface{}, ctx con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkspacesService_StartWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartWorkspaceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkspacesServiceServer).StartWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gitpod.experimental.v1.WorkspacesService/StartWorkspace",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkspacesServiceServer).StartWorkspace(ctx, req.(*StartWorkspaceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkspacesService_StopWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(StopWorkspaceRequest)
 	if err := dec(in); err != nil {
@@ -368,6 +434,42 @@ func _WorkspacesService_UpdatePort_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkspacesService_ListWorkspaceClasses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkspaceClassesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkspacesServiceServer).ListWorkspaceClasses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gitpod.experimental.v1.WorkspacesService/ListWorkspaceClasses",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkspacesServiceServer).ListWorkspaceClasses(ctx, req.(*ListWorkspaceClassesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkspacesService_GetDefaultWorkspaceImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDefaultWorkspaceImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkspacesServiceServer).GetDefaultWorkspaceImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gitpod.experimental.v1.WorkspacesService/GetDefaultWorkspaceImage",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkspacesServiceServer).GetDefaultWorkspaceImage(ctx, req.(*GetDefaultWorkspaceImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkspacesService_ServiceDesc is the grpc.ServiceDesc for WorkspacesService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -392,6 +494,10 @@ var WorkspacesService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _WorkspacesService_CreateAndStartWorkspace_Handler,
 		},
 		{
+			MethodName: "StartWorkspace",
+			Handler:    _WorkspacesService_StartWorkspace_Handler,
+		},
+		{
 			MethodName: "StopWorkspace",
 			Handler:    _WorkspacesService_StopWorkspace_Handler,
 		},
@@ -402,6 +508,14 @@ var WorkspacesService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdatePort",
 			Handler:    _WorkspacesService_UpdatePort_Handler,
+		},
+		{
+			MethodName: "ListWorkspaceClasses",
+			Handler:    _WorkspacesService_ListWorkspaceClasses_Handler,
+		},
+		{
+			MethodName: "GetDefaultWorkspaceImage",
+			Handler:    _WorkspacesService_GetDefaultWorkspaceImage_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

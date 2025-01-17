@@ -1,22 +1,18 @@
 terraform {
   backend "gcs" {
-    bucket = "3f4745df-preview-tf-state"
+    bucket = "5d39183e-preview-tf-state"
     prefix = "preview"
   }
 
-  required_version = ">= 1.2"
+  required_version = ">= 1.8"
   required_providers {
-    harvester = {
-      source  = "harvester/harvester"
-      version = "=0.5.3"
-    }
     k8s = {
       source  = "hashicorp/kubernetes"
       version = ">= 2.0"
     }
     google = {
       source  = "hashicorp/google"
-      version = ">=4.40.0"
+      version = ">=5.25.0"
     }
     acme = {
       source  = "vancluever/acme"
@@ -25,27 +21,15 @@ terraform {
   }
 }
 
-provider "harvester" {
-  alias       = "harvester"
-  kubeconfig  = pathexpand(var.kubeconfig_path)
-  kubecontext = "harvester"
-}
-
 provider "k8s" {
   alias          = "dev"
   config_path    = pathexpand(var.kubeconfig_path)
   config_context = var.dev_kube_context
 }
 
-provider "k8s" {
-  alias          = "harvester"
-  config_path    = pathexpand(var.kubeconfig_path)
-  config_context = var.harvester_kube_context
-}
-
 provider "google" {
-  project = "gitpod-core-dev"
-  region  = "us-central1"
+  project = "gitpod-dev-preview"
+  region  = "europe-west1"
 }
 
 provider "acme" {

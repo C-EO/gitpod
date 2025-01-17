@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/pointer"
 )
 
@@ -57,7 +58,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 						Containers: []corev1.Container{
 							{
 								Name:            ContainerName,
-								Image:           ctx.ImageName(common.ThirdPartyContainerRepo(ctx.Config.Repository, RegistryRepo), RegistryImage, ImageTag),
+								Image:           ctx.ImageDigest(common.ThirdPartyContainerRepo(ctx.Config.Repository, RegistryRepo), RegistryImage, ImageDigest),
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Command: []string{
 									"redis-server",
@@ -90,8 +91,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 								},
 								ReadinessProbe: &corev1.Probe{
 									ProbeHandler: corev1.ProbeHandler{
-										Exec: &v1.ExecAction{
-											Command: []string{"redis-cli", "ping", "|", "grep", "pong"},
+										TCPSocket: &corev1.TCPSocketAction{
+											Port: intstr.FromInt(Port),
 										},
 									},
 									InitialDelaySeconds: 5,
@@ -103,7 +104,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 							},
 							{
 								Name:            ExporterContainerName,
-								Image:           ctx.ImageName(common.ThirdPartyContainerRepo(ctx.Config.Repository, RegistryRepo), ExporterRegistryImage, ExporterImageTag),
+								Image:           ctx.ImageDigest(common.ThirdPartyContainerRepo(ctx.Config.Repository, ExporterRegistryRepo), ExporterRegistryImage, ExporterImageDigest),
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Env: common.CustomizeEnvvar(ctx, Component, common.MergeEnv(
 									[]v1.EnvVar{

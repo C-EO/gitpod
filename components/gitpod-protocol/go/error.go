@@ -21,9 +21,6 @@ const (
 	// 409 Conflict (e.g. already existing)
 	CONFLICT = 409
 
-	// 410 No User
-	SETUP_REQUIRED = 410
-
 	// 411 No User
 	NEEDS_VERIFICATION = 411
 
@@ -32,9 +29,6 @@ const (
 
 	// 430 Repository not whitelisted (custom status code)
 	REPOSITORY_NOT_WHITELISTED = 430
-
-	// 440 Prebuilds now always require a project (custom status code)
-	PROJECT_REQUIRED = 440
 
 	// 451 Out of credits
 	PAYMENT_SPENDING_LIMIT_REACHED = 451

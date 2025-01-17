@@ -4,13 +4,14 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ReactComponent as Exclamation } from "../images/exclamation.svg";
 import { ReactComponent as Exclamation2 } from "../images/exclamation2.svg";
 import { ReactComponent as InfoSvg } from "../images/info.svg";
 import { ReactComponent as XSvg } from "../images/x.svg";
 import { ReactComponent as Check } from "../images/check-circle.svg";
 import classNames from "classnames";
+import { Button } from "@podkit/buttons/Button";
 
 export type AlertType =
     // Green
@@ -32,6 +33,7 @@ export interface AlertProps {
     // Without background color, default false
     light?: boolean;
     closable?: boolean;
+    autoFocusClose?: boolean;
     onClose?: () => void;
     showIcon?: boolean;
     icon?: React.ReactNode;
@@ -44,6 +46,7 @@ interface AlertInfo {
     txtCls: string;
     icon: React.ReactNode;
     iconColor?: string;
+    closeIconColor?: string;
 }
 
 const infoMap: Record<AlertType, AlertInfo> = {
@@ -63,7 +66,7 @@ const infoMap: Record<AlertType, AlertInfo> = {
         bgCls: "bg-gray-100 dark:bg-gray-700",
         txtCls: "text-gray-500 dark:text-gray-300",
         icon: <InfoSvg className="w-4 h-4"></InfoSvg>,
-        iconColor: "text-gray-400",
+        iconColor: "text-gray-400 dark:text-gray-300",
     },
     message: {
         bgCls: "bg-blue-50 dark:bg-blue-800",
@@ -82,23 +85,35 @@ const infoMap: Record<AlertType, AlertInfo> = {
         txtCls: "text-white",
         icon: <Exclamation className="w-4 h-4"></Exclamation>,
         iconColor: "filter-brightness-10",
+        closeIconColor: "text-white",
     },
 };
 
 export default function Alert(props: AlertProps) {
     const [visible, setVisible] = useState(true);
-    if (!visible) {
-        return null;
-    }
+
     const type: AlertType = props.type ?? "info";
     const info = infoMap[type];
     const showIcon = props.showIcon ?? true;
     const light = props.light ?? false;
     const rounded = props.rounded ?? true;
+    const autoFocusClose = props.autoFocusClose ?? false;
+
+    const handleClose = useCallback(() => {
+        setVisible(false);
+        if (props.onClose) {
+            props.onClose();
+        }
+    }, [props]);
+
+    if (!visible) {
+        return null;
+    }
+
     return (
         <div
             className={classNames(
-                "flex relative whitespace-pre-wrap p-4",
+                "flex items-center relative whitespace-pre-wrap p-4",
                 info.txtCls,
                 props.className,
                 light ? "" : info.bgCls,
@@ -108,16 +123,21 @@ export default function Alert(props: AlertProps) {
             {showIcon && <span className={`mt-1 mr-4 h-4 w-4 ${info.iconColor}`}>{props.icon ?? info.icon}</span>}
             <span className="flex-1 text-left">{props.children}</span>
             {props.closable && (
-                <span className={`mt-1 ml-4 h-4 w-4`}>
-                    <XSvg
-                        onClick={() => {
-                            setVisible(false);
-                            if (props.onClose) {
-                                props.onClose();
-                            }
-                        }}
-                        className="w-3 h-4 cursor-pointer"
-                    ></XSvg>
+                <span className={`ml-4`}>
+                    {/* Use an IconButton component once we make it */}
+                    <Button
+                        variant="ghost"
+                        className="hover:bg-transparent"
+                        onClick={handleClose}
+                        autoFocus={autoFocusClose}
+                    >
+                        <XSvg
+                            className={classNames(
+                                "w-3 h-4 cursor-pointer dark:text-white",
+                                info.closeIconColor || "text-gray-700",
+                            )}
+                        />
+                    </Button>
                 </span>
             )}
         </div>

@@ -4,19 +4,19 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-// generated using github.com/32leaves/bel on 2023-02-14 09:41:16.808994006 +0000 UTC m=+0.008933200
+// generated using github.com/32leaves/bel on 2024-09-10 10:27:59.702679509 +0000 UTC m=+0.029900569
 // DO NOT MODIFY
+
+export interface WorkspaceReadyMessage {
+    source: WorkspaceInitSource;
+    metrics: InitializerMetric[];
+}
 
 export enum WorkspaceInitSource {
     WorkspaceInitFromBackup = "from-backup",
     WorkspaceInitFromPrebuild = "from-prebuild",
     WorkspaceInitFromOther = "from-other",
 }
-export interface WorkspaceReadyMessage {
-    source: WorkspaceInitSource;
-    metrics: InitializerMetric[];
-}
-
 export interface InitializerMetric {
     type: string;
     duration: number;

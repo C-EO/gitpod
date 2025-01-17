@@ -39,8 +39,8 @@ type ConfigSerialized struct {
 	EnablePayment                     bool        `json:"enablePayment"`
 	LinkedInSecretsFile               string      `json:"linkedInSecretsFile"`
 	PATSigningKeyFile                 string      `json:"patSigningKeyFile"`
-	ShowSetupModal                    bool        `json:"showSetupModal"`
 	Auth                              auth.Config `json:"auth"`
+	IsDedicatedInstallation           bool        `json:"isDedicatedInstallation"`
 
 	WorkspaceHeartbeat         WorkspaceHeartbeat         `json:"workspaceHeartbeat"`
 	WorkspaceDefaults          WorkspaceDefaults          `json:"workspaceDefaults"`
@@ -48,7 +48,6 @@ type ConfigSerialized struct {
 	GitHubApp                  GitHubApp                  `json:"githubApp"`
 	WorkspaceGarbageCollection WorkspaceGarbageCollection `json:"workspaceGarbageCollection"`
 	CompleteSnapshotJob        JobConfig                  `json:"completeSnapshotJob"`
-	LongRunningMigrationsJob   JobConfig                  `json:"longRunningMigrationsJob"`
 	AuthProviderConfigFiles    []string                   `json:"authProviderConfigFiles"`
 	IncrementalPrebuilds       IncrementalPrebuilds       `json:"incrementalPrebuilds"`
 	BlockNewUsers              config.BlockNewUsers       `json:"blockNewUsers"`
@@ -160,10 +159,6 @@ type WorkspaceClass struct {
 }
 
 type NamedWorkspaceFeatureFlag string
-
-const (
-	NamedWorkspaceFeatureFlagFullWorkspaceBackup NamedWorkspaceFeatureFlag = "full_workspace_backup"
-)
 
 type WorkspaceClassCategory string
 

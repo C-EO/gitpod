@@ -10,14 +10,16 @@ const (
 	PortName = "api"
 	Port     = 6379
 
-	RegistryRepo  = "registry.hub.docker.com"
-	RegistryImage = "library/redis"
-	ImageTag      = "7.0.8"
+	RegistryRepo  = "cgr.dev"
+	RegistryImage = "chainguard/redis"
 
 	ContainerName = "redis"
+	ImageDigest   = "sha256:dc74ed2817f14bca80560beeb1feed5a0f285fc6f5b00fe748554e9b4c7db2fd"
 
+	ExporterRegistryRepo  = "quay.io"
 	ExporterRegistryImage = "oliver006/redis_exporter"
-	ExporterImageTag      = "v1.48.0"
+	ExporterImageDigest   = "sha256:120f7ec77293459ccfdad66bb1db75ab72e8bfeab99f58b1cc2564cadcd7a9e7"
+
 	ExporterContainerName = "exporter"
 	ExporterPortName      = "exporter"
 	ExporterPort          = 9500

@@ -6,23 +6,24 @@
 
 import { TraceContext } from "@gitpod/gitpod-protocol/lib/util/tracing";
 import { GetWorkspacesRequest } from "@gitpod/ws-manager/lib";
-import { DisposableCollection, RunningWorkspaceInfo, WorkspaceInstance } from "@gitpod/gitpod-protocol";
+import { Disposable, DisposableCollection, RunningWorkspaceInfo, WorkspaceInstance } from "@gitpod/gitpod-protocol";
 import { inject, injectable } from "inversify";
 import { Configuration } from "./config";
 import { log, LogContext } from "@gitpod/gitpod-protocol/lib/util/logging";
-import { PrometheusMetricsExporter } from "./prometheus-metrics-exporter";
+import { Metrics } from "./metrics";
 import { WorkspaceDB } from "@gitpod/gitpod-db/lib/workspace-db";
 import { DBWithTracing, TracedUserDB, TracedWorkspaceDB } from "@gitpod/gitpod-db/lib/traced-db";
 import { UserDB } from "@gitpod/gitpod-db/lib/user-db";
-import { MessageBusIntegration } from "./messagebus-integration";
-import { PrebuildUpdater } from "./prebuild-updater";
 import { IAnalyticsWriter } from "@gitpod/gitpod-protocol/lib/analytics";
 import { ClientProvider } from "./wsman-subscriber";
 import { repeat } from "@gitpod/gitpod-protocol/lib/util/repeat";
+import { PrebuildUpdater } from "./prebuild-updater";
+import { RedisPublisher } from "@gitpod/gitpod-db/lib";
+import { durationLongerThanSeconds } from "@gitpod/gitpod-protocol/lib/util/timeutil";
 
 export const WorkspaceInstanceController = Symbol("WorkspaceInstanceController");
 
-export interface WorkspaceInstanceController {
+export interface WorkspaceInstanceController extends Disposable {
     start(
         workspaceClusterName: string,
         clientProvider: ClientProvider,
@@ -46,26 +47,16 @@ export interface WorkspaceInstanceController {
  * !!! It's statful, so make sure it's bound in transient mode !!!
  */
 @injectable()
-export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceController {
-    @inject(Configuration) protected readonly config: Configuration;
-
-    @inject(PrometheusMetricsExporter)
-    protected readonly prometheusExporter: PrometheusMetricsExporter;
-
-    @inject(TracedWorkspaceDB)
-    protected readonly workspaceDB: DBWithTracing<WorkspaceDB>;
-
-    @inject(TracedUserDB)
-    protected readonly userDB: DBWithTracing<UserDB>;
-
-    @inject(MessageBusIntegration)
-    protected readonly messagebus: MessageBusIntegration;
-
-    @inject(PrebuildUpdater)
-    protected readonly prebuildUpdater: PrebuildUpdater;
-
-    @inject(IAnalyticsWriter)
-    protected readonly analytics: IAnalyticsWriter;
+export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceController, Disposable {
+    constructor(
+        @inject(Configuration) private readonly config: Configuration,
+        @inject(Metrics) private readonly prometheusExporter: Metrics,
+        @inject(TracedWorkspaceDB) private readonly workspaceDB: DBWithTracing<WorkspaceDB>,
+        @inject(TracedUserDB) private readonly userDB: DBWithTracing<UserDB>,
+        @inject(PrebuildUpdater) private readonly prebuildUpdater: PrebuildUpdater,
+        @inject(IAnalyticsWriter) private readonly analytics: IAnalyticsWriter,
+        @inject(RedisPublisher) private readonly publisher: RedisPublisher,
+    ) {}
 
     protected readonly disposables = new DisposableCollection();
 
@@ -281,7 +272,12 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
         // important: call this after the DB update
         await this.onStopped(ctx, info.workspace.ownerId, info.latestInstance);
 
-        await this.messagebus.notifyOnInstanceUpdate(ctx, info.workspace.ownerId, info.latestInstance);
+        await this.publisher.publishInstanceUpdate({
+            ownerID: info.workspace.ownerId,
+            instanceID: info.latestInstance.id,
+            workspaceID: info.workspace.id,
+        });
+
         await this.prebuildUpdater.stopPrebuildInstance(ctx, info.latestInstance);
     }
 
@@ -294,7 +290,14 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
                 userId: ownerUserID,
                 event: "workspace_stopped",
                 messageId: `bridge-wsstopped-${instance.id}`,
-                properties: { instanceId: instance.id, workspaceId: instance.workspaceId },
+                properties: {
+                    instanceId: instance.id,
+                    workspaceId: instance.workspaceId,
+                    stoppingTime: new Date(instance.stoppingTime!),
+                    conditions: instance.status.conditions,
+                    timeout: instance.status.timeout,
+                },
+                timestamp: new Date(instance.stoppedTime!),
             });
         } catch (err) {
             TraceContext.setError({ span }, err);
@@ -303,8 +306,8 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
             span.finish();
         }
     }
-}
 
-const durationLongerThanSeconds = (time: number, durationSeconds: number, now: number = Date.now()) => {
-    return (now - time) / 1000 > durationSeconds;
-};
+    public dispose() {
+        this.disposables.dispose();
+    }
+}

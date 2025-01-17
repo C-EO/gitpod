@@ -14,7 +14,7 @@ type GitpodServerMethodType =
     | keyof Omit<GitpodServer, "dispose" | "setClient">
     | typeof accessCodeSyncStorage
     | typeof accessHeadlessLogs;
-type GroupKey = "default" | "startWorkspace" | "createWorkspace" | "phoneVerification" | "sendHeartBeat";
+type GroupKey = "default" | "startWorkspace" | "createWorkspace" | "phoneVerification" | "sendHeartBeat" | "getToken";
 type GroupsConfig = {
     [key: string]: {
         points: number;
@@ -44,7 +44,6 @@ export function isValidFunctionName(name: string): boolean {
 
 const defaultFunctions: FunctionsConfig = {
     getLoggedInUser: { group: "default", points: 1 },
-    migrateLoggedInUserToOrgOnlyMode: { group: "default", points: 1 },
     updateLoggedInUser: { group: "default", points: 1 },
     sendPhoneNumberVerificationToken: { group: "phoneVerification", points: 1 },
     verifyPhoneNumberVerificationToken: { group: "phoneVerification", points: 1 },
@@ -58,15 +57,14 @@ const defaultFunctions: FunctionsConfig = {
     deleteOrgAuthProvider: { group: "default", points: 1 },
     getConfiguration: { group: "default", points: 1 },
     getGitpodTokenScopes: { group: "default", points: 1 },
-    getToken: { group: "default", points: 1 },
+    getToken: { group: "getToken", points: 1 },
     deleteAccount: { group: "default", points: 1 },
     getClientRegion: { group: "default", points: 1 },
-    hasPermission: { group: "default", points: 1 },
     getWorkspaces: { group: "default", points: 1 },
     getWorkspaceOwner: { group: "default", points: 1 },
     getWorkspaceUsers: { group: "default", points: 1 },
-    getFeaturedRepositories: { group: "default", points: 1 },
-    getSuggestedContextURLs: { group: "default", points: 1 },
+    getSuggestedRepositories: { group: "default", points: 1 },
+    searchRepositories: { group: "default", points: 1 },
     getWorkspace: { group: "default", points: 1 },
     isWorkspaceOwner: { group: "default", points: 1 },
     getOwnerToken: { group: "default", points: 1 },
@@ -87,10 +85,8 @@ const defaultFunctions: FunctionsConfig = {
     getOpenPorts: { group: "default", points: 1 },
     openPort: { group: "default", points: 1 },
     closePort: { group: "default", points: 1 },
-    getUserStorageResource: { group: "default", points: 1 },
-    updateUserStorageResource: { group: "default", points: 1 },
+    updateGitStatus: { group: "default", points: 1 },
     getWorkspaceEnvVars: { group: "default", points: 1 },
-    getEnvVars: { group: "default", points: 1 },
     getAllEnvVars: { group: "default", points: 1 },
     setEnvVar: { group: "default", points: 1 },
     deleteEnvVar: { group: "default", points: 1 },
@@ -114,10 +110,11 @@ const defaultFunctions: FunctionsConfig = {
     deleteTeam: { group: "default", points: 1 },
     getOrgSettings: { group: "default", points: 1 },
     updateOrgSettings: { group: "default", points: 1 },
+    getOrgWorkspaceClasses: { group: "default", points: 1 },
+    getDefaultWorkspaceImage: { group: "default", points: 1 },
     getProviderRepositoriesForUser: { group: "default", points: 1 },
     createProject: { group: "default", points: 1 },
     getTeamProjects: { group: "default", points: 1 },
-    getUserProjects: { group: "default", points: 1 },
     deleteProject: { group: "default", points: 1 },
     findPrebuilds: { group: "default", points: 1 },
     getPrebuild: { group: "default", points: 1 },
@@ -126,8 +123,6 @@ const defaultFunctions: FunctionsConfig = {
     triggerPrebuild: { group: "default", points: 1 },
     cancelPrebuild: { group: "default", points: 1 },
     updateProjectPartial: { group: "default", points: 1 },
-    getContentBlobUploadUrl: { group: "default", points: 1 },
-    getContentBlobDownloadUrl: { group: "default", points: 1 },
     getGitpodTokens: { group: "default", points: 1 },
     generateNewGitpodToken: { group: "default", points: 1 },
     deleteGitpodToken: { group: "default", points: 1 },
@@ -138,6 +133,7 @@ const defaultFunctions: FunctionsConfig = {
     getSnapshots: { group: "default", points: 1 },
     guessGitTokenScopes: { group: "default", points: 1 },
     getUsageBalance: { group: "default", points: 1 },
+    isCustomerBillingAddressInvalid: { group: "default", points: 1 },
     resolveContext: { group: "default", points: 1 },
 
     adminGetUsers: { group: "default", points: 1 },
@@ -159,9 +155,6 @@ const defaultFunctions: FunctionsConfig = {
     adminGetProjectsBySearchTerm: { group: "default", points: 1 },
     adminGetProjectById: { group: "default", points: 1 },
     adminFindPrebuilds: { group: "default", points: 1 },
-    adminGetSettings: { group: "default", points: 1 },
-    adminUpdateSettings: { group: "default", points: 1 },
-    adminGetTelemetryData: { group: "default", points: 1 },
     adminGetBlockedRepositories: { group: "default", points: 1 },
     adminCreateBlockedRepository: { group: "default", points: 1 },
     adminDeleteBlockedRepository: { group: "default", points: 1 },
@@ -171,6 +164,8 @@ const defaultFunctions: FunctionsConfig = {
     adminListUsage: { group: "default", points: 1 },
     adminAddUsageCreditNote: { group: "default", points: 1 },
     adminGetUsageBalance: { group: "default", points: 1 },
+    adminGetBlockedEmailDomains: { group: "default", points: 1 },
+    adminSaveBlockedEmailDomain: { group: "default", points: 1 },
 
     accessCodeSyncStorage: { group: "default", points: 1 },
 
@@ -185,7 +180,6 @@ const defaultFunctions: FunctionsConfig = {
     getPriceInformation: { group: "default", points: 1 },
     listUsage: { group: "default", points: 1 },
     getBillingModeForTeam: { group: "default", points: 1 },
-    getBillingModeForUser: { group: "default", points: 1 },
     getLinkedInClientId: { group: "default", points: 1 },
     connectWithLinkedIn: { group: "default", points: 1 },
 
@@ -193,17 +187,17 @@ const defaultFunctions: FunctionsConfig = {
     trackLocation: { group: "default", points: 1 },
     identifyUser: { group: "default", points: 1 },
     getIDEOptions: { group: "default", points: 1 },
-    getPrebuildEvents: { group: "default", points: 1 },
-    setUsageAttribution: { group: "default", points: 1 },
-    listAvailableUsageAttributionIds: { group: "default", points: 1 },
+    getIDEVersions: { group: "default", points: 1 },
     getCostCenter: { group: "default", points: 1 },
     setUsageLimit: { group: "default", points: 1 },
     getSupportedWorkspaceClasses: { group: "default", points: 1 },
-    maySetTimeout: { group: "default", points: 1 },
     updateWorkspaceTimeoutSetting: { group: "default", points: 1 },
     getIDToken: { group: "default", points: 1 },
     reportErrorBoundary: { group: "default", points: 1 },
     getOnboardingState: { group: "default", points: 1 },
+    getAuthProvider: { group: "default", points: 1 },
+    deleteAuthProvider: { group: "default", points: 1 },
+    updateAuthProvider: { group: "default", points: 1 },
 };
 
 function getConfig(config: RateLimiterConfig): RateLimiterConfig {
@@ -211,6 +205,10 @@ function getConfig(config: RateLimiterConfig): RateLimiterConfig {
     const defaultGroups: GroupsConfig = {
         default: {
             points: 200, // 200 calls per user, per connection, per minute
+            durationsSec: 60,
+        },
+        getToken: {
+            points: 500, // 500 calls per user, per connection, per minute
             durationsSec: 60,
         },
         startWorkspace: {

@@ -12,6 +12,8 @@ import crying from "../images/feedback/crying-emoji.svg";
 import { trackEvent, TrackFeedback } from "../Analytics";
 import { StartWorkspaceError } from "../start/StartPage";
 import { Heading2 } from "../components/typography/headings";
+import { Button } from "@podkit/buttons/Button";
+import { cn } from "@podkit/lib/cn";
 
 function FeedbackComponent(props: {
     onClose?: () => void;
@@ -60,15 +62,15 @@ function FeedbackComponent(props: {
             { id: 4, name: "starry", src: starry },
         ];
         return emojiList.map((emoji) => (
-            <button
-                className={
-                    "hover:scale-150 transform bg-transparent bottom-5 right-5 cursor-pointer " +
-                    (selectedEmoji === emoji.id ? "" : "grayed")
-                }
-                onClick={() => handleClick(emoji.id)}
-            >
-                <img src={emoji.src} alt={`${emoji.name} emoji`} width={width || "24px"} title={emoji.name} />
-            </button>
+            <Button variant="ghost" onClick={() => handleClick(emoji.id)}>
+                <img
+                    src={emoji.src}
+                    alt={`${emoji.name} emoji`}
+                    width={width || "24px"}
+                    title={emoji.name}
+                    className={cn("hover:scale-150 transition-all", selectedEmoji !== emoji.id && "grayed")}
+                />
+            </Button>
         ));
     };
 
@@ -94,53 +96,53 @@ function FeedbackComponent(props: {
                         {props.message}
                     </p>
 
-                    <div className="flex items-center justify-center w-full">{emojiGroup(props.initialSize || 50)}</div>
+                    <div className="mt-4 flex items-center justify-center w-full">
+                        {emojiGroup(props.initialSize || 50)}
+                    </div>
                 </div>
             )}
             {expandedWithTextView && (
-                <>
-                    <div
-                        className={
-                            "flex flex-col px-6 py-4 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 " +
-                            (props.isError
-                                ? "w-96 mt-6 bg-gray-100 dark:bg-gray-800 rounded-xl"
-                                : "-mx-6 border-t border-b")
-                        }
-                    >
-                        <div className="relative">
-                            <textarea
-                                style={{ height: "160px", borderRadius: "6px" }}
-                                autoFocus
-                                className="w-full resize-none text-gray-400 dark:text-gray-400 focus:ring-0 focus:border-gray-400 dark:focus:border-gray-400 rounded-md border dark:bg-gray-800 dark:border-gray-500 border-gray-500"
-                                name="name"
-                                value={text}
-                                placeholder="Have more feedback?"
-                                onChange={(e) => setText(e.target.value)}
-                            />
-                        </div>
+                <div
+                    className={
+                        "flex flex-col px-6 py-4 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 " +
+                        (props.isError
+                            ? "w-96 mt-6 bg-gray-100 dark:bg-gray-800 rounded-xl"
+                            : "-mx-6 border-t border-b")
+                    }
+                >
+                    <div className="relative">
+                        <textarea
+                            style={{ height: "160px", borderRadius: "6px" }}
+                            autoFocus
+                            className="w-full resize-none text-gray-400 dark:text-gray-400 focus:ring-0 focus:border-gray-400 dark:focus:border-gray-400 rounded-md border dark:bg-gray-800 dark:border-gray-500 border-gray-500"
+                            name="name"
+                            value={text}
+                            placeholder="Have more feedback?"
+                            onChange={(e) => setText(e.target.value)}
+                        />
+                    </div>
+                    <div>
+                        <p className="text-gray-500">
+                            {" "}
+                            By submitting this form you acknowledge that you have read and understood our{" "}
+                            <a className="gp-link" target="gitpod-privacy" href="https://www.gitpod.io/privacy/">
+                                privacy policy
+                            </a>
+                            .
+                        </p>
+                    </div>
+                    <div className="flex justify-between mt-6">
+                        <div className="flex bottom-5 right-5 -space-x-3">{emojiGroup(24)}</div>
                         <div>
-                            <p className="text-gray-500">
-                                {" "}
-                                By submitting this form you acknowledge that you have read and understood our{" "}
-                                <a className="gp-link" target="gitpod-privacy" href="https://www.gitpod.io/privacy/">
-                                    privacy policy
-                                </a>
-                                .
-                            </p>
-                        </div>
-                        <div className="flex justify-between mt-6">
-                            <div className="flex bottom-5 right-5 -space-x-3">{emojiGroup(24)}</div>
-                            <div>
-                                <button className="secondary" onClick={onClose}>
-                                    Cancel
-                                </button>
-                                <button className="ml-2" onClick={onSubmit}>
-                                    Send Feedback
-                                </button>
-                            </div>
+                            <Button variant="secondary" onClick={onClose}>
+                                Cancel
+                            </Button>
+                            <Button className="ml-2" onClick={onSubmit}>
+                                Send Feedback
+                            </Button>
                         </div>
                     </div>
-                </>
+                </div>
             )}
             {isFeedbackSubmitted && (
                 <div

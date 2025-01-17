@@ -36,8 +36,11 @@ func (v version) Factory() interface{} {
 	}
 }
 
+var (
+	defaultRepositoryUrl = config.GitpodContainerRegistry
+)
+
 const (
-	defaultRepositoryUrl  = "eu.gcr.io/gitpod-core-dev/build"
 	defaultOpenVSXURL     = "https://open-vsx.org"
 	defaultMetadataRegion = "local"
 )
@@ -70,16 +73,10 @@ func (v version) Defaults(in interface{}) error {
 		corev1.ResourceCPU:    resource.MustParse("1000m"),
 		corev1.ResourceMemory: resource.MustParse("2Gi"),
 	}
-	cfg.Workspace.Runtime.FSShiftMethod = FSShiftFuseFS
+	cfg.Workspace.Runtime.FSShiftMethod = FSShiftShiftFS
 	cfg.Workspace.Runtime.ContainerDSocketDir = containerd.ContainerdSocketLocationDefault.String()
 	cfg.Workspace.Runtime.ContainerDRuntimeDir = containerd.ContainerdLocationDefault.String()
 	cfg.Workspace.MaxLifetime = util.Duration(36 * time.Hour)
-	cfg.Workspace.PrebuildPVC.Size = resource.MustParse("30Gi")
-	cfg.Workspace.PrebuildPVC.StorageClass = ""
-	cfg.Workspace.PrebuildPVC.SnapshotClass = ""
-	cfg.Workspace.PVC.Size = resource.MustParse("30Gi")
-	cfg.Workspace.PVC.StorageClass = ""
-	cfg.Workspace.PVC.SnapshotClass = ""
 	cfg.OpenVSX.URL = defaultOpenVSXURL
 	cfg.DisableDefinitelyGP = true
 
@@ -127,8 +124,6 @@ type Config struct {
 
 	Database Database `json:"database" validate:"required"`
 
-	MessageBus *MessageBus `json:"messageBus,omitempty"`
-
 	ObjectStorage ObjectStorage `json:"objectStorage" validate:"required"`
 
 	ContainerRegistry ContainerRegistry `json:"containerRegistry" validate:"required"`
@@ -148,6 +143,8 @@ type Config struct {
 
 	SSHGatewayHostKey *ObjectRef `json:"sshGatewayHostKey,omitempty"`
 
+	SSHGatewayCAKey *ObjectRef `json:"sshGatewayCAKey,omitempty"`
+
 	DisableDefinitelyGP bool `json:"disableDefinitelyGp"`
 
 	CustomCACert *ObjectRef `json:"customCACert,omitempty"`
@@ -157,8 +154,6 @@ type Config struct {
 	Customization *[]Customization `json:"customization,omitempty"`
 
 	Components *Components `json:"components,omitempty"`
-
-	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`
 
 	Experimental *experimental.Config `json:"experimental,omitempty"`
 }
@@ -191,10 +186,6 @@ type Tracing struct {
 	// Name of the kubernetes secret to use for Jaeger authentication
 	// The secret should contains two definitions: JAEGER_USER and JAEGER_PASSWORD
 	SecretName *string `json:"secretName,omitempty"`
-}
-
-type MessageBus struct {
-	Credentials *ObjectRef `json:"credentials"`
 }
 
 type Database struct {
@@ -263,10 +254,14 @@ const (
 )
 
 type ContainerRegistry struct {
-	InCluster                 *bool                      `json:"inCluster,omitempty" validate:"required"`
-	External                  *ContainerRegistryExternal `json:"external,omitempty" validate:"required_if=InCluster false"`
-	S3Storage                 *S3Storage                 `json:"s3storage,omitempty"`
-	PrivateBaseImageAllowList []string                   `json:"privateBaseImageAllowList"`
+	InCluster *bool                      `json:"inCluster,omitempty" validate:"required"`
+	External  *ContainerRegistryExternal `json:"external,omitempty" validate:"required_if=InCluster false"`
+	S3Storage *S3Storage                 `json:"s3storage,omitempty"`
+
+	PrivateBaseImageAllowList []string `json:"privateBaseImageAllowList"`
+	EnableAdditionalECRAuth   bool     `json:"enableAdditionalECRAuth"`
+
+	SubassemblyBucket string `json:"subassemblyBucket"`
 }
 
 type ContainerRegistryExternal struct {
@@ -337,27 +332,10 @@ type WorkspaceTemplates struct {
 	Regular    *corev1.Pod `json:"regular"`
 }
 
-type PersistentVolumeClaim struct {
-	// Size is a size of persistent volume claim to use
-	Size resource.Quantity `json:"size" validate:"required"`
-
-	// StorageClass is a storage class of persistent volume claim to use
-	StorageClass string `json:"storageClass"`
-
-	// SnapshotClass is a snapshot class name that is used to create volume snapshot
-	SnapshotClass string `json:"snapshotClass"`
-}
-
 type Workspace struct {
 	Runtime   WorkspaceRuntime    `json:"runtime" validate:"required"`
 	Resources Resources           `json:"resources" validate:"required"`
 	Templates *WorkspaceTemplates `json:"templates,omitempty"`
-
-	// PrebuildPVC is the struct that describes how to setup persistent volume claim for prebuild workspace
-	PrebuildPVC PersistentVolumeClaim `json:"prebuildPVC" validate:"required"`
-
-	// PVC is the struct that describes how to setup persistent volume claim for regular workspace
-	PVC PersistentVolumeClaim `json:"pvc" validate:"required"`
 
 	// MaxLifetime is the maximum time a workspace is allowed to run. After that, the workspace times out despite activity
 	MaxLifetime util.Duration `json:"maxLifetime" validate:"required"`
@@ -391,7 +369,6 @@ type Proxy struct {
 type FSShiftMethod string
 
 const (
-	FSShiftFuseFS  FSShiftMethod = "fuse"
 	FSShiftShiftFS FSShiftMethod = "shiftfs"
 )
 
@@ -455,12 +432,4 @@ type ProxyComponent struct {
 
 type ComponentTypeService struct {
 	ServiceType *corev1.ServiceType `json:"serviceType,omitempty" validate:"omitempty,service_config_type"`
-}
-
-type TelemetryConfig struct {
-	Data *TelemetryData `json:"data,omitempty"`
-}
-
-type TelemetryData struct {
-	Platform string `json:"platform"`
 }

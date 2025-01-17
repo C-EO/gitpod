@@ -7,7 +7,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useHistory, useLocation } from "react-router-dom";
 import { useOrganizationsInvalidator } from "../data/organizations/orgs-query";
-import { publicApiTeamToProtocol, teamsService } from "../service/public-api";
+import { useDocumentTitle } from "../hooks/use-document-title";
+import { organizationClient } from "../service/public-api";
+import { workspacesPathMain } from "../workspaces/workspaces.routes";
 
 export default function JoinTeamPage() {
     const orgInvalidator = useOrganizationsInvalidator();
@@ -23,10 +25,10 @@ export default function JoinTeamPage() {
                 if (!inviteId) {
                     throw new Error("This invite URL is incorrect.");
                 }
-                const team = publicApiTeamToProtocol((await teamsService.joinTeam({ invitationId: inviteId })).team!);
+                const response = await organizationClient.joinOrganization({ invitationId: inviteId });
                 orgInvalidator();
 
-                history.push(`/members?org=${team.id}`);
+                history.push(workspacesPathMain + `?org=${response.organizationId}`);
             } catch (error) {
                 console.error(error);
                 setJoinError(error);
@@ -34,9 +36,7 @@ export default function JoinTeamPage() {
         })();
     }, [history, inviteId, orgInvalidator]);
 
-    useEffect(() => {
-        document.title = "Joining Organization — Gitpod";
-    }, []);
+    useDocumentTitle("Joining Organization");
 
     return joinError ? <div className="mt-16 text-center text-gitpod-red">{String(joinError)}</div> : <></>;
 }

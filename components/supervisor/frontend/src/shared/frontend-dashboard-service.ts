@@ -9,6 +9,7 @@ import { IDEFrontendDashboardService } from "@gitpod/gitpod-protocol/lib/fronten
 import { RemoteTrackMessage } from "@gitpod/gitpod-protocol/lib/analytics";
 import { Emitter } from "@gitpod/gitpod-protocol/lib/util/event";
 import { workspaceUrl, serverUrl } from "./urls";
+import { metricsReporter } from "../ide/ide-metrics-service-client";
 
 export class FrontendDashboardServiceClient implements IDEFrontendDashboardService.IClient {
     public latestInfo!: IDEFrontendDashboardService.Info;
@@ -20,8 +21,12 @@ export class FrontendDashboardServiceClient implements IDEFrontendDashboardServi
     private readonly onOpenBrowserIDEEmitter = new Emitter<void>();
     readonly onOpenBrowserIDE = this.onOpenBrowserIDEEmitter.event;
 
+    private readonly onWillRedirectEmitter = new Emitter<void>();
+    readonly onWillRedirect = this.onWillRedirectEmitter.event;
+
     private resolveInit!: () => void;
     private initPromise = new Promise<void>((resolve) => (this.resolveInit = resolve));
+    private featureFlags: Partial<IDEFrontendDashboardService.FeatureFlagsUpdateEventData["flags"]> = {};
 
     private version?: number;
 
@@ -31,6 +36,13 @@ export class FrontendDashboardServiceClient implements IDEFrontendDashboardServi
                 return;
             }
             if (IDEFrontendDashboardService.isInfoUpdateEventData(event.data)) {
+                metricsReporter.updateCommonErrorDetails({
+                    userId: event.data.info.loggedUserId,
+                    ownerId: event.data.info.ownerId,
+                    workspaceId: event.data.info.workspaceID,
+                    instanceId: event.data.info.instanceId,
+                    instancePhase: event.data.info.statusPhase,
+                });
                 this.version = event.data.version;
                 this.latestInfo = event.data.info;
                 if (event.data.info.credentialsToken?.length > 0) {
@@ -42,12 +54,17 @@ export class FrontendDashboardServiceClient implements IDEFrontendDashboardServi
                 this.onDidChangeEmitter.fire(this.latestInfo);
             }
             if (IDEFrontendDashboardService.isRelocateEventData(event.data)) {
+                this.onWillRedirectEmitter.fire();
                 window.location.href = event.data.url;
             }
             if (IDEFrontendDashboardService.isOpenBrowserIDE(event.data)) {
                 this.onOpenBrowserIDEEmitter.fire(undefined);
             }
+            if (IDEFrontendDashboardService.isFeatureFlagsUpdateEventData(event.data)) {
+                this.featureFlags = event.data.flags;
+            }
         });
+        this.requestFreshFeatureFlags();
     }
     initialize(): Promise<void> {
         return this.initPromise;
@@ -127,6 +144,17 @@ export class FrontendDashboardServiceClient implements IDEFrontendDashboardServi
             { type: "ide-open-desktop", url } as IDEFrontendDashboardService.OpenDesktopIDE,
             serverUrl.url.origin,
         );
+    }
+
+    requestFreshFeatureFlags(): void {
+        window.postMessage(
+            { type: "ide-feature-flag-request" } as IDEFrontendDashboardService.FeatureFlagsRequestEventData,
+            serverUrl.url.origin,
+        );
+    }
+
+    isCheckReadyRetryEnabled(): boolean {
+        return !!this.featureFlags.supervisor_check_ready_retry;
     }
 }
 

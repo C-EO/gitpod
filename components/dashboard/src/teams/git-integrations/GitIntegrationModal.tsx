@@ -4,9 +4,8 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { AuthProviderEntry } from "@gitpod/gitpod-protocol";
-import { FunctionComponent, useCallback, useMemo, useState } from "react";
-import { Button } from "../../components/Button";
+import { FunctionComponent, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { Button } from "@podkit/buttons/Button";
 import { InputField } from "../../components/forms/InputField";
 import { SelectInputField } from "../../components/forms/SelectInputField";
 import { TextInputField } from "../../components/forms/TextInputField";
@@ -14,46 +13,57 @@ import { InputWithCopy } from "../../components/InputWithCopy";
 import Modal, { ModalBody, ModalFooter, ModalFooterAlert, ModalHeader } from "../../components/Modal";
 import { Subheading } from "../../components/typography/headings";
 import { useInvalidateOrgAuthProvidersQuery } from "../../data/auth-providers/org-auth-providers-query";
-import { useUpsertOrgAuthProviderMutation } from "../../data/auth-providers/upsert-org-auth-provider-mutation";
 import { useCurrentOrg } from "../../data/organizations/orgs-query";
 import { useOnBlurError } from "../../hooks/use-onblur-error";
-import { openAuthorizeWindow } from "../../provider-utils";
-import { getGitpodService, gitpodHostUrl } from "../../service/service";
+import { openAuthorizeWindow, toAuthProviderLabel } from "../../provider-utils";
+import { gitpodHostUrl } from "../../service/service";
+import { UserContext } from "../../user-context";
+import { useToast } from "../../components/toasts/Toasts";
+import { AuthProvider, AuthProviderType } from "@gitpod/public-api/lib/gitpod/v1/authprovider_pb";
+import { useCreateOrgAuthProviderMutation } from "../../data/auth-providers/create-org-auth-provider-mutation";
+import { useUpdateOrgAuthProviderMutation } from "../../data/auth-providers/update-org-auth-provider-mutation";
+import { authProviderClient, userClient } from "../../service/public-api";
+import { LoadingButton } from "@podkit/buttons/LoadingButton";
+import {
+    isSupportAzureDevOpsIntegration,
+    useAuthProviderOptionsQuery,
+} from "../../data/auth-providers/auth-provider-options-query";
 
 type Props = {
-    provider?: AuthProviderEntry;
+    provider?: AuthProvider;
     onClose: () => void;
 };
-
 export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
+    const { setUser } = useContext(UserContext);
+    const { toast } = useToast();
     const team = useCurrentOrg().data;
-    const [type, setType] = useState<string>(props.provider?.type ?? "GitLab");
+    const [type, setType] = useState<AuthProviderType>(props.provider?.type ?? AuthProviderType.GITLAB);
     const [host, setHost] = useState<string>(props.provider?.host ?? "");
-    const [clientId, setClientId] = useState<string>(props.provider?.oauth.clientId ?? "");
-    const [clientSecret, setClientSecret] = useState<string>(props.provider?.oauth.clientSecret ?? "");
+    const [clientId, setClientId] = useState<string>(props.provider?.oauth2Config?.clientId ?? "");
+    const [clientSecret, setClientSecret] = useState<string>(props.provider?.oauth2Config?.clientSecret ?? "");
+    const [authorizationUrl, setAuthorizationUrl] = useState(props.provider?.oauth2Config?.authorizationUrl ?? "");
+    const [tokenUrl, setTokenUrl] = useState(props.provider?.oauth2Config?.tokenUrl ?? "");
+    const availableProviderOptions = useAuthProviderOptionsQuery(true);
+    const supportAzureDevOps = isSupportAzureDevOpsIntegration();
 
     const [savedProvider, setSavedProvider] = useState(props.provider);
     const isNew = !savedProvider;
 
     // This is a readonly value to copy and plug into external oauth config
-    const redirectURL = useMemo(() => {
-        let url = "";
+    const redirectURL = callbackUrl();
 
-        // Once it's saved, use what's stored
-        if (!isNew) {
-            url = savedProvider?.oauth.callBackUrl ?? url;
-        } else {
-            // Otherwise construct it w/ their provided host value or example
-            url = callbackUrl(host || "gitlab.example.com");
+    // "bitbucket.org" is set as host value whenever "Bitbucket" is selected
+    useEffect(() => {
+        if (isNew) {
+            setHost(type === AuthProviderType.BITBUCKET ? "bitbucket.org" : "");
         }
-
-        return url;
-    }, [host, isNew, savedProvider?.oauth.callBackUrl]);
+    }, [isNew, type]);
 
     const [savingProvider, setSavingProvider] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | undefined>();
 
-    const upsertProvider = useUpsertOrgAuthProviderMutation();
+    const createProvider = useCreateOrgAuthProviderMutation();
+    const updateProvider = useUpdateOrgAuthProviderMutation();
     const invalidateOrgAuthProviders = useInvalidateOrgAuthProvidersQuery(team?.id ?? "");
 
     const {
@@ -66,13 +76,34 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
         message: clientIdError,
         onBlur: clientIdOnBlur,
         isValid: clientIdValid,
-    } = useOnBlurError(`${type === "GitLab" ? "Application ID" : "Client ID"} is missing.`, clientId.trim().length > 0);
+    } = useOnBlurError(
+        `${type === AuthProviderType.GITLAB ? "Application ID" : "Client ID"} is missing.`,
+        clientId.trim().length > 0,
+    );
 
     const {
         message: clientSecretError,
         onBlur: clientSecretOnBlur,
         isValid: clientSecretValid,
-    } = useOnBlurError(`${type === "GitLab" ? "Secret" : "Client Secret"} is missing.`, clientSecret.trim().length > 0);
+    } = useOnBlurError(
+        `${type === AuthProviderType.GITLAB ? "Secret" : "Client Secret"} is missing.`,
+        clientSecret.trim().length > 0,
+    );
+
+    const {
+        message: authorizationUrlError,
+        onBlur: authorizationUrlOnBlur,
+        isValid: authorizationUrlValid,
+    } = useOnBlurError(
+        `Authorization URL is missing.`,
+        type !== AuthProviderType.AZURE_DEVOPS || authorizationUrl.trim().length > 0,
+    );
+
+    const {
+        message: tokenUrlError,
+        onBlur: tokenUrlOnBlur,
+        isValid: tokenUrlValid,
+    } = useOnBlurError(`Token URL is missing.`, type !== AuthProviderType.AZURE_DEVOPS || tokenUrl.trim().length > 0);
 
     // Call our error onBlur handler, and remove prefixed "https://"
     const hostOnBlur = useCallback(() => {
@@ -81,18 +112,14 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
         setHost(cleanHost(host));
     }, [host, hostOnBlurErrorTracking]);
 
-    // TODO: We could remove this extra state management if we convert the modal into a detail flow w/ it's own route
-    // Used to grab latest provider record after activation flow
     const reloadSavedProvider = useCallback(async () => {
         if (!savedProvider || !team) {
             return;
         }
 
-        const provider = (await getGitpodService().server.getOrgAuthProviders({ organizationId: team.id })).find(
-            (ap) => ap.id === savedProvider.id,
-        );
-        if (provider) {
-            setSavedProvider(provider);
+        const { authProvider } = await authProviderClient.getAuthProvider({ authProviderId: savedProvider.id });
+        if (authProvider) {
+            setSavedProvider(authProvider);
         }
     }, [savedProvider, team]);
 
@@ -108,24 +135,34 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
 
         const trimmedId = clientId.trim();
         const trimmedSecret = clientSecret.trim();
+        const trimmedAuthorizationUrl = authorizationUrl.trim();
+        const trimmedTokenUrl = tokenUrl.trim();
 
         try {
-            const newProvider = await upsertProvider.mutateAsync({
-                provider: isNew
-                    ? {
-                          host: cleanHost(host),
-                          type,
-                          clientId: trimmedId,
-                          clientSecret: trimmedSecret,
-                          organizationId: team.id,
-                      }
-                    : {
-                          id: savedProvider.id,
-                          clientId: trimmedId,
-                          clientSecret: clientSecret === "redacted" ? "" : trimmedSecret,
-                          organizationId: team.id,
-                      },
-            });
+            let newProvider: AuthProvider;
+            if (isNew) {
+                newProvider = await createProvider.mutateAsync({
+                    provider: {
+                        host: cleanHost(host),
+                        type,
+                        orgId: team.id,
+                        clientId: trimmedId,
+                        clientSecret: trimmedSecret,
+                        authorizationUrl: trimmedAuthorizationUrl,
+                        tokenUrl: trimmedTokenUrl,
+                    },
+                });
+            } else {
+                newProvider = await updateProvider.mutateAsync({
+                    provider: {
+                        id: savedProvider.id,
+                        clientId: trimmedId,
+                        clientSecret: clientSecret === "redacted" ? "" : trimmedSecret,
+                        authorizationUrl: trimmedAuthorizationUrl,
+                        tokenUrl: trimmedTokenUrl,
+                    },
+                });
+            }
 
             // switch mode to stay and edit this integration.
             setSavedProvider(newProvider);
@@ -140,6 +177,15 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
                 host: newProvider.host,
                 onSuccess: (payload) => {
                     invalidateOrgAuthProviders();
+
+                    // Refresh the current user - they may have a new identity record now
+                    // setup a promise and don't wait so we can close the modal right away
+                    userClient.getAuthenticatedUser({}).then(({ user }) => {
+                        if (user) {
+                            setUser(user);
+                        }
+                    });
+                    toast(`${toAuthProviderLabel(newProvider.type)} integration has been activated.`);
 
                     props.onClose();
                 },
@@ -164,61 +210,104 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
     }, [
         clientId,
         clientSecret,
+        authorizationUrl,
+        tokenUrl,
         host,
         invalidateOrgAuthProviders,
         isNew,
         props,
-        reloadSavedProvider,
         savedProvider?.id,
+        setUser,
         team,
+        toast,
         type,
-        upsertProvider,
+        createProvider,
+        updateProvider,
+        reloadSavedProvider,
     ]);
 
     const isValid = useMemo(
-        () => clientIdValid && clientSecretValid && hostValid,
-        [clientIdValid, clientSecretValid, hostValid],
+        () => clientIdValid && clientSecretValid && hostValid && authorizationUrlValid && tokenUrlValid,
+        [clientIdValid, clientSecretValid, hostValid, authorizationUrlValid, tokenUrlValid],
     );
 
+    const getNumber = (paramValue: string | null) => {
+        if (!paramValue) {
+            return 0;
+        }
+
+        try {
+            const number = Number.parseInt(paramValue, 10);
+            if (Number.isNaN(number)) {
+                return 0;
+            }
+
+            return number;
+        } catch (e) {
+            return 0;
+        }
+    };
+
     return (
-        <Modal
-            visible
-            onClose={props.onClose}
-            onEnter={() => {
-                activate();
-                return false;
-            }}
-        >
-            <ModalHeader>{isNew ? "New Git Integration" : "Git Integration"}</ModalHeader>
+        <Modal visible onClose={props.onClose} onSubmit={activate} autoFocus={isNew}>
+            <ModalHeader>{isNew ? "New Git Provider" : "Git Provider"}</ModalHeader>
             <ModalBody>
                 {isNew && (
                     <Subheading>
-                        Configure a Git Integration with a self-managed instance of GitLab, GitHub, or Bitbucket Server.
+                        Configure a Git Integration with a self-managed instance of GitLab, GitHub{" "}
+                        {supportAzureDevOps ? ", Bitbucket Server or Azure DevOps" : "or Bitbucket"}.
                     </Subheading>
                 )}
 
                 <div>
-                    <SelectInputField disabled={!isNew} label="Provider Type" value={type} onChange={setType}>
-                        <option value="GitHub">GitHub</option>
-                        <option value="GitLab">GitLab</option>
-                        <option value="BitbucketServer">Bitbucket Server</option>
+                    <SelectInputField
+                        disabled={!isNew}
+                        label="Provider Type"
+                        value={type.toString()}
+                        topMargin={false}
+                        onChange={(val) => setType(getNumber(val))}
+                    >
+                        {availableProviderOptions.map((option) => (
+                            <option key={option.type} value={option.type}>
+                                {option.label}
+                            </option>
+                        ))}
                     </SelectInputField>
                     <TextInputField
                         label="Provider Host Name"
                         value={host}
-                        disabled={!isNew}
+                        disabled={!isNew || type === AuthProviderType.BITBUCKET}
                         placeholder={getPlaceholderForIntegrationType(type)}
                         error={hostError}
                         onChange={setHost}
                         onBlur={hostOnBlur}
                     />
 
-                    <InputField label="Redirect URI" hint={<RedirectUrlDescription type={type} host={host} />}>
+                    <InputField label="Redirect URI" hint={<RedirectUrlDescription type={type} />}>
                         <InputWithCopy value={redirectURL} tip="Copy the redirect URI to clipboard" />
                     </InputField>
 
+                    {type === AuthProviderType.AZURE_DEVOPS && (
+                        <>
+                            <TextInputField
+                                label="Authorization URL"
+                                value={authorizationUrl}
+                                error={authorizationUrlError}
+                                onBlur={authorizationUrlOnBlur}
+                                onChange={setAuthorizationUrl}
+                            />
+                            <TextInputField
+                                label="Token URL"
+                                value={tokenUrl}
+                                error={tokenUrlError}
+                                onBlur={tokenUrlOnBlur}
+                                onChange={setTokenUrl}
+                            />
+                        </>
+                    )}
+
                     <TextInputField
-                        label={type === "GitLab" ? "Application ID" : "Client ID"}
+                        label={type === AuthProviderType.GITLAB ? "Application ID" : "Client ID"}
                         value={clientId}
                         error={clientIdError}
                         onBlur={clientIdOnBlur}
@@ -226,7 +315,7 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
                     />
 
                     <TextInputField
-                        label={type === "GitLab" ? "Secret" : "Client Secret"}
+                        label={type === AuthProviderType.GITLAB ? "Secret" : "Client Secret"}
                         type="password"
                         value={clientSecret}
                         error={clientSecretError}
@@ -242,7 +331,7 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
                             <ModalFooterAlert type="danger">{errorMessage}</ModalFooterAlert>
                         ) : (
                             !isNew &&
-                            savedProvider?.status !== "verified" && (
+                            !savedProvider?.verified && (
                                 <ModalFooterAlert type="warning" closable={false}>
                                     You need to activate this configuration.
                                 </ModalFooterAlert>
@@ -251,64 +340,59 @@ export const GitIntegrationModal: FunctionComponent<Props> = (props) => {
                     </>
                 }
             >
-                <Button type="secondary" onClick={props.onClose}>
+                <Button variant="secondary" onClick={props.onClose}>
                     Cancel
                 </Button>
-                <Button onClick={activate} disabled={!isValid || savingProvider} loading={savingProvider}>
+                <LoadingButton type="submit" disabled={!isValid} loading={savingProvider}>
                     Activate
-                </Button>
+                </LoadingButton>
             </ModalFooter>
         </Modal>
     );
 };
 
-const callbackUrl = (host: string) => {
-    // Negative Lookahead (?!\/)
-    // `\/` matches the character `/`
-    // "https://foobar:80".replace(/:(?!\/)/, "_")
-    // => 'https://foobar_80'
-    host = host.replace(/:(?!\/)/, "_");
-    const pathname = `/auth/${host}/callback`;
+const callbackUrl = () => {
+    const pathname = `/auth/callback`;
     return gitpodHostUrl.with({ pathname }).toString();
 };
 
-const getPlaceholderForIntegrationType = (type: string) => {
+const getPlaceholderForIntegrationType = (type: AuthProviderType) => {
     switch (type) {
-        case "GitHub":
+        case AuthProviderType.GITHUB:
             return "github.example.com";
-        case "GitLab":
+        case AuthProviderType.GITLAB:
             return "gitlab.example.com";
-        case "BitbucketServer":
+        case AuthProviderType.BITBUCKET:
+            return "bitbucket.org";
+        case AuthProviderType.BITBUCKET_SERVER:
             return "bitbucket.example.com";
+        case AuthProviderType.AZURE_DEVOPS:
+            return "dev.azure.com";
         default:
             return "";
     }
 };
 
 type RedirectUrlDescriptionProps = {
-    type: string;
-    host: string;
+    type: AuthProviderType;
 };
-const RedirectUrlDescription: FunctionComponent<RedirectUrlDescriptionProps> = ({ type, host }) => {
-    let settingsUrl = ``;
-    switch (type) {
-        case "GitHub":
-            settingsUrl = `${host}/settings/developers`;
-            break;
-        case "GitLab":
-            settingsUrl = `${host}/-/profile/applications`;
-            break;
-        default:
-            return null;
-    }
-
+const RedirectUrlDescription: FunctionComponent<RedirectUrlDescriptionProps> = ({ type }) => {
     let docsUrl = ``;
     switch (type) {
-        case "GitHub":
-            docsUrl = `https://www.gitpod.io/docs/github-integration/#oauth-application`;
+        case AuthProviderType.GITHUB:
+            docsUrl = `https://www.gitpod.io/docs/configure/authentication/github-enterprise`;
             break;
-        case "GitLab":
-            docsUrl = `https://www.gitpod.io/docs/gitlab-integration/#oauth-application`;
+        case AuthProviderType.GITLAB:
+            docsUrl = `https://www.gitpod.io/docs/configure/authentication/gitlab#registering-a-self-hosted-gitlab-installation`;
+            break;
+        case AuthProviderType.BITBUCKET:
+            docsUrl = `https://www.gitpod.io/docs/configure/authentication`;
+            break;
+        case AuthProviderType.BITBUCKET_SERVER:
+            docsUrl = "https://www.gitpod.io/docs/configure/authentication/bitbucket-server";
+            break;
+        case AuthProviderType.AZURE_DEVOPS:
+            docsUrl = "https://www.gitpod.io/docs/configure/authentication/azure-devops";
             break;
         default:
             return null;
@@ -316,15 +400,11 @@ const RedirectUrlDescription: FunctionComponent<RedirectUrlDescriptionProps> = (
 
     return (
         <span>
-            Use this redirect URI to update the OAuth application. Go to{" "}
-            <a href={`https://${settingsUrl}`} target="_blank" rel="noreferrer noopener" className="gp-link">
-                developer settings
-            </a>{" "}
-            and setup the OAuth application.&nbsp;
+            Use this redirect URI to register a {toAuthProviderLabel(type)} instance as an authorized Git provider in
+            Gitpod.{" "}
             <a href={docsUrl} target="_blank" rel="noreferrer noopener" className="gp-link">
                 Learn more
             </a>
-            .
         </span>
     );
 };

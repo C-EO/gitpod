@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2025 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -31,6 +31,16 @@ func (s *ProxyIDEClientServiceHandler) SendHeartbeat(ctx context.Context, req *c
 
 func (s *ProxyIDEClientServiceHandler) SendDidClose(ctx context.Context, req *connect_go.Request[v1.SendDidCloseRequest]) (*connect_go.Response[v1.SendDidCloseResponse], error) {
 	resp, err := s.Client.SendDidClose(ctx, req.Msg)
+	if err != nil {
+		// TODO(milan): Convert to correct status code
+		return nil, err
+	}
+
+	return connect_go.NewResponse(resp), nil
+}
+
+func (s *ProxyIDEClientServiceHandler) UpdateGitStatus(ctx context.Context, req *connect_go.Request[v1.UpdateGitStatusRequest]) (*connect_go.Response[v1.UpdateGitStatusResponse], error) {
+	resp, err := s.Client.UpdateGitStatus(ctx, req.Msg)
 	if err != nil {
 		// TODO(milan): Convert to correct status code
 		return nil, err
